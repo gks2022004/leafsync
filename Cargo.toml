@@ -1,0 +1,22 @@
+[package]
+name = "leafsync"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "LeafSync v1: P2P QUIC file sync with Merkle-based delta"
+
+[dependencies]
+anyhow = "1"
+bincode = "1"
+clap = { version = "4", features = ["derive"] }
+quinn = "0.10"
+rcgen = "0.11"
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+walkdir = "2"
+
+[profile.release]
+codegen-units = 1
+lto = true
