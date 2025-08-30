@@ -1,4 +1,4 @@
-# LeafSync
+# <img src="https://github.com/user-attachments/assets/77c7b4b1-9dce-4dde-99f7-593ef111b5b5" alt="leafsync" width="72" height="72" align="middle" /> **LeafSync**
 
 Peer-to-peer file sync over QUIC with Merkle-based delta transfers.
 
