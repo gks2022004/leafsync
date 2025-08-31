@@ -16,6 +16,7 @@ serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 walkdir = "2"
+directories = "5"
 
 [profile.release]
 codegen-units = 1

@@ -1,4 +1,4 @@
-use crate::{chunk::{chunk_file, rel_paths_in_dir, ChunkInfo, write_chunk}, merkle::{build_merkle, root_hash}, protocol::{FileSummary}};
+use crate::{chunk::{chunk_file, rel_paths_in_dir, ChunkInfo, write_chunk, CHUNK_SIZE}, merkle::{build_merkle, root_hash}, protocol::{FileSummary}};
 use anyhow::{Result};
 use std::path::{Path, PathBuf};
 
@@ -42,6 +42,28 @@ pub fn apply_chunk(root: &Path, rel_path: &str, index: u64, data: &[u8]) -> Resu
     let abs = root.join(rel_path);
     if let Some(parent) = abs.parent() { std::fs::create_dir_all(parent)?; }
     write_chunk(&abs, index, data)?;
+    Ok(())
+}
+
+/// Ensure the file is truncated to the expected number of chunks.
+pub fn truncate_to_chunks(root: &Path, rel_path: &str, chunk_count: u64, last_chunk_size: Option<usize>) -> Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let abs = root.join(rel_path);
+    if !abs.exists() { return Ok(()); }
+    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(&abs)?;
+    let expected_size = if chunk_count == 0 { 0 } else { (chunk_count - 1) * CHUNK_SIZE as u64 + last_chunk_size.unwrap_or(CHUNK_SIZE) as u64 };
+    f.set_len(expected_size)?;
+    f.seek(SeekFrom::Start(expected_size))?;
+    f.flush()?;
+    Ok(())
+}
+
+/// Truncate or extend the file to an exact byte size.
+pub fn truncate_to_size(root: &Path, rel_path: &str, size: u64) -> Result<()> {
+    let abs = root.join(rel_path);
+    if !abs.exists() { return Ok(()); }
+    let f = std::fs::OpenOptions::new().write(true).open(&abs)?;
+    f.set_len(size)?;
     Ok(())
 }
 

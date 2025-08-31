@@ -3,6 +3,7 @@ mod chunk;
 mod merkle;
 mod protocol;
 mod syncer;
+mod identity;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

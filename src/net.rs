@@ -1,17 +1,18 @@
-use anyhow::{Result};
-use quinn::{Endpoint, ServerConfig, RecvStream, SendStream};
-use rcgen::generate_simple_self_signed;
-use rustls::{Certificate, ClientConfig as RustlsClientConfig, RootCertStore, PrivateKey};
+use anyhow::Result;
+use quinn::{Endpoint, RecvStream, SendStream};
+use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::io::AsyncWriteExt;
 
 use crate::{protocol::{Msg, FileSummary}, syncer, chunk::{chunk_file, read_chunk, ChunkInfo}};
+use crate::identity;
 
 pub async fn run_server(folder: PathBuf, port: u16) -> Result<()> {
-    let (server_config, cert_der) = make_server_config()?;
+    let (server_config, cert_der) = identity::make_server_config()?;
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
     let endpoint = Endpoint::server(server_config, addr)?;
     println!("Server cert SHA-256 fingerprint: {}", sha256_hex(&cert_der));
+    if let Ok(dir) = identity::state_dir() { println!("Identity dir: {}", dir.display()); }
     println!("Listening on {addr}");
 
     while let Some(connecting) = endpoint.accept().await {
@@ -29,10 +30,18 @@ async fn handle_connection_server(folder: PathBuf, conn: quinn::Connecting) -> R
     let connection = conn.await?;
     println!("Peer connected: {}", connection.remote_address());
     let (mut send, mut recv) = connection.accept_bi().await?;
+    println!("Opened bi stream with client");
 
+    // version negotiation
+    send_msg(&mut send, &Msg::Version { major: 1, minor: 0 }).await?;
+    match recv_msg(&mut recv).await? {
+        Some(Msg::Version { major, .. }) if major == 1 => {}
+        other => { println!("Version mismatch or missing: {:?}", other); return Ok(()); }
+    }
     // handshake: receive Hello
     if let Some(msg) = recv_msg(&mut recv).await? {
         if let Msg::Hello { folder: _ } = msg {
+            println!("Received Hello");
             // send summary
             let summaries = syncer::all_summaries(&folder)?;
             let files: Vec<FileSummary> = summaries.iter().map(|(s, _)| s.clone()).collect();
@@ -40,20 +49,24 @@ async fn handle_connection_server(folder: PathBuf, conn: quinn::Connecting) -> R
 
             // Then serve per-file requests
             loop {
-                match recv_msg(&mut recv).await? {
+        match recv_msg(&mut recv).await? {
                     Some(Msg::RequestFile { rel_path }) => {
+            println!("RequestFile: {}", rel_path);
                         let abs = folder.join(&rel_path);
                         let chunks = if abs.exists() { chunk_file(&abs)? } else { Vec::new() };
+                        let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
                         let chunk_hashes: Vec<[u8; 32]> = chunks.iter().map(|c| c.hash).collect();
-                        send_msg(&mut send, &Msg::FileMeta { rel_path: rel_path.clone(), chunk_count: chunks.len() as u64, root: merkle_root_from_chunks(&chunks), chunk_hashes }).await?;
+                        send_msg(&mut send, &Msg::FileMeta { rel_path: rel_path.clone(), size, chunk_count: chunks.len() as u64, root: merkle_root_from_chunks(&chunks), chunk_hashes }).await?;
                     }
                     Some(Msg::RequestChunks { rel_path, indices }) => {
+            println!("RequestChunks: {} ({} indices)", rel_path, indices.len());
                         let abs = folder.join(&rel_path);
                         for idx in indices {
                             let data = read_chunk(&abs, idx).unwrap_or_default();
                             send_msg(&mut send, &Msg::ChunkData { rel_path: rel_path.clone(), index: idx, data }).await?;
                         }
                         send_msg(&mut send, &Msg::Done).await?;
+            println!("Sent Done for {}", rel_path);
                     }
                     Some(Msg::Done) => break,
                     None => break,
@@ -74,25 +87,34 @@ pub async fn run_client(addr: String, folder: PathBuf) -> Result<()> {
 
     let connection = endpoint.connect(server_addr, "localhost")?.await?;
     let (mut send, mut recv) = connection.open_bi().await?;
+    println!("Opened bi stream to server");
+
+    // version negotiation: send first, then expect server's version
+    send_msg(&mut send, &Msg::Version { major: 1, minor: 0 }).await?;
+    match recv_msg(&mut recv).await? {
+        Some(Msg::Version { major, .. }) if major == 1 => {}
+        other => { println!("Expected Version from server, got {:?}", other); return Ok(()); }
+    }
 
     // hello + get summary
     send_msg(&mut send, &Msg::Hello { folder: folder.to_string_lossy().to_string() }).await?;
-    let summary = match recv_msg(&mut recv).await? { Some(Msg::Summary { files }) => files, _ => vec![] };
+    let summary = match recv_msg(&mut recv).await? { Some(Msg::Summary { files }) => files, other => { println!("Expected Summary, got {:?}", other); vec![] } };
+    println!("Server reported {} files", summary.len());
 
     // for each remote file, compare and request missing
     for remote in summary {
         println!("Syncing {} ({} chunks)", remote.rel_path, remote.chunk_count);
-        send_msg(&mut send, &Msg::RequestFile { rel_path: remote.rel_path.clone() }).await?;
+    send_msg(&mut send, &Msg::RequestFile { rel_path: remote.rel_path.clone() }).await?;
         let meta = match recv_msg(&mut recv).await? {
-            Some(Msg::FileMeta { rel_path, chunk_count: _, root: _, chunk_hashes }) => (rel_path, chunk_hashes),
+            Some(Msg::FileMeta { rel_path, size, chunk_count, root: _, chunk_hashes }) => (rel_path, size, chunk_count, chunk_hashes),
             _ => continue,
         };
 
         // compute local chunk hashes
-        let abs_local = folder.join(&meta.0);
+    let abs_local = folder.join(&meta.0);
         let local_chunks: Vec<ChunkInfo> = if abs_local.exists() { chunk_file(&abs_local)? } else { Vec::new() };
-        let need = crate::syncer::diff_needed_indices(&local_chunks, &meta.1);
-        if need.is_empty() { println!("Up to date: {}", meta.0); continue; }
+    let need = crate::syncer::diff_needed_indices(&local_chunks, &meta.3);
+    if need.is_empty() { println!("Up to date: {}", meta.0); continue; }
 
         println!("Requesting {} chunks for {}", need.len(), meta.0);
         send_msg(&mut send, &Msg::RequestChunks { rel_path: meta.0.clone(), indices: need.clone() }).await?;
@@ -101,10 +123,15 @@ pub async fn run_client(addr: String, folder: PathBuf) -> Result<()> {
             match recv_msg(&mut recv).await? {
                 Some(Msg::ChunkData { rel_path, index, data }) => {
                     crate::syncer::apply_chunk(&folder, &rel_path, index, &data)?;
-                    print!(". ");
+            print!(". ");
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
-                Some(Msg::Done) => { println!("\nDone."); break; }
+                Some(Msg::Done) => {
+                    // Truncate to exact remote size
+                    let _ = crate::syncer::truncate_to_size(&folder, &meta.0, meta.1);
+                    println!("\nDone.");
+                    break;
+                }
                 None => break,
                 _ => {}
             }
@@ -137,20 +164,6 @@ async fn recv_msg(recv: &mut RecvStream) -> Result<Option<Msg>> {
     let mut buf = vec![0u8; len];
     if recv.read_exact(&mut buf).await.is_err() { return Ok(None); }
     Ok(Some(crate::protocol::decode(&buf)))
-}
-
-fn make_server_config() -> Result<(ServerConfig, Vec<u8>)> {
-    let cert = generate_simple_self_signed(["localhost".into()])?;
-    let cert_der = cert.serialize_der()?;
-    let key_der = cert.serialize_private_key_der();
-
-    let chain = vec![Certificate(cert_der.clone())];
-    let key = PrivateKey(key_der);
-    let mut server_config = quinn::ServerConfig::with_single_cert(chain, key)?;
-    let mut transport = quinn::TransportConfig::default();
-    transport.max_concurrent_bidi_streams(64u32.into());
-    server_config.transport = Arc::new(transport);
-    Ok((server_config, cert_der))
 }
 
 fn make_client_config_insecure() -> Result<quinn::ClientConfig> {
