@@ -67,6 +67,37 @@ pub fn truncate_to_size(root: &Path, rel_path: &str, size: u64) -> Result<()> {
     Ok(())
 }
 
+// Atomic finalize support
+pub fn staging_path(root: &Path, rel_path: &str) -> PathBuf {
+    let tmp_dir = root.join(".leafsync_tmp");
+    tmp_dir.join(rel_path).with_extension("part")
+}
+
+pub fn apply_chunk_staging(root: &Path, rel_path: &str, index: u64, data: &[u8]) -> Result<PathBuf> {
+    let stage = staging_path(root, rel_path);
+    if let Some(parent) = stage.parent() { std::fs::create_dir_all(parent)?; }
+    write_chunk(&stage, index, data)?;
+    Ok(stage)
+}
+
+pub fn finalize_staging(root: &Path, rel_path: &str) -> Result<()> {
+    let stage = staging_path(root, rel_path);
+    let final_path = root.join(rel_path);
+    if let Some(parent) = final_path.parent() { std::fs::create_dir_all(parent)?; }
+    if final_path.exists() { std::fs::remove_file(&final_path)?; }
+    std::fs::rename(stage, final_path)?;
+    Ok(())
+}
+
 pub fn path_from_rel(root: &Path, rel: &str) -> PathBuf {
     root.join(rel)
+}
+
+/// Truncate or extend the staged file to an exact byte size.
+pub fn truncate_staging_to_size(root: &Path, rel_path: &str, size: u64) -> Result<()> {
+    let stage = staging_path(root, rel_path);
+    if let Some(parent) = stage.parent() { std::fs::create_dir_all(parent)?; }
+    let f = std::fs::OpenOptions::new().create(true).write(true).open(&stage)?;
+    f.set_len(size)?;
+    Ok(())
 }

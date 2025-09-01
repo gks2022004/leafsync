@@ -1,0 +1,14 @@
+Key Features & Benefits
+Reduced Latency:
+QUIC combines the security (TLS) and transport handshakes into a single, faster initial handshake, resulting in quicker connection setup. 
+Eliminates Head-of-Line Blocking:
+Unlike TCP, where a single packet loss can stall all data streams, QUIC's stream multiplexing allows independent streams to continue data flow even when other streams experience packet loss. 
+Built-in Security:
+QUIC mandates Transport Layer Security (TLS), integrating encryption and authentication directly into the protocol rather than as an add-on layer. 
+Connection Migration:
+QUIC supports connection migration, allowing a connection to persist even if a user's IP address or network changes, ensuring a smoother experience. 
+Standardized and Widely Adopted:
+Originally a Google innovation, QUIC is now standardized in the IETF's RFC 9000 and is widely used for applications like HTTP/3, which runs on top of it. 
+How it Works
+1. UDP-based:
+QUIC operates over UDP, which is a simpler, more flexible protocol than TCP, allowing for faster development and evolution of features. 

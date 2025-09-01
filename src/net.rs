@@ -1,11 +1,14 @@
 use anyhow::Result;
 use quinn::{Endpoint, RecvStream, SendStream};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
+use rustls::client::{ServerCertVerifier, ServerCertVerified};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::io::AsyncWriteExt;
 
 use crate::{protocol::{Msg, FileSummary}, syncer, chunk::{chunk_file, read_chunk, ChunkInfo}};
 use crate::identity;
+use crate::trust;
+use crate::resume;
 
 pub async fn run_server(folder: PathBuf, port: u16) -> Result<()> {
     let (server_config, cert_der) = identity::make_server_config()?;
@@ -79,9 +82,11 @@ async fn handle_connection_server(folder: PathBuf, conn: quinn::Connecting) -> R
     Ok(())
 }
 
-pub async fn run_client(addr: String, folder: PathBuf) -> Result<()> {
+pub async fn run_client(addr: String, folder: PathBuf, accept_first: bool, fingerprint: Option<String>) -> Result<()> {
     let server_addr: SocketAddr = addr.parse()?;
-    let client_cfg = make_client_config_insecure()?; // trust any cert for prototype
+    // Determine expected fingerprint from CLI or trust store
+    let expected = if let Some(fp) = fingerprint { Some(fp) } else { trust::get(&addr)? };
+    let client_cfg = make_client_config_pinned(addr.clone(), expected, accept_first)?;
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())?;
     endpoint.set_default_client_config(client_cfg);
 
@@ -106,29 +111,57 @@ pub async fn run_client(addr: String, folder: PathBuf) -> Result<()> {
         println!("Syncing {} ({} chunks)", remote.rel_path, remote.chunk_count);
     send_msg(&mut send, &Msg::RequestFile { rel_path: remote.rel_path.clone() }).await?;
         let meta = match recv_msg(&mut recv).await? {
-            Some(Msg::FileMeta { rel_path, size, chunk_count, root: _, chunk_hashes }) => (rel_path, size, chunk_count, chunk_hashes),
+            Some(Msg::FileMeta { rel_path, size, chunk_count, root, chunk_hashes }) => (rel_path, size, chunk_count, root, chunk_hashes),
             _ => continue,
         };
 
         // compute local chunk hashes
     let abs_local = folder.join(&meta.0);
         let local_chunks: Vec<ChunkInfo> = if abs_local.exists() { chunk_file(&abs_local)? } else { Vec::new() };
-    let need = crate::syncer::diff_needed_indices(&local_chunks, &meta.3);
+    let need_base = crate::syncer::diff_needed_indices(&local_chunks, &meta.4);
+    // Merge with resume store missing list if present
+    let need = if let Some(mut missing) = resume::missing_indices_for(&addr, &meta.0, meta.1, meta.2, meta.3)? {
+        // intersect resume missing with base diff (only request what differs)
+        missing.retain(|i| need_base.contains(i));
+        if missing.is_empty() { need_base } else { missing }
+    } else { need_base };
     if need.is_empty() { println!("Up to date: {}", meta.0); continue; }
 
         println!("Requesting {} chunks for {}", need.len(), meta.0);
         send_msg(&mut send, &Msg::RequestChunks { rel_path: meta.0.clone(), indices: need.clone() }).await?;
         // receive chunks until Done
+        let mut received_indices: Vec<u64> = Vec::new();
         loop {
             match recv_msg(&mut recv).await? {
                 Some(Msg::ChunkData { rel_path, index, data }) => {
-                    crate::syncer::apply_chunk(&folder, &rel_path, index, &data)?;
+                    // Write into staging area for atomic finalize
+                    let _ = crate::syncer::apply_chunk_staging(&folder, &rel_path, index, &data)?;
+                    received_indices.push(index);
             print!(". ");
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
                 Some(Msg::Done) => {
-                    // Truncate to exact remote size
-                    let _ = crate::syncer::truncate_to_size(&folder, &meta.0, meta.1);
+                    if !received_indices.is_empty() {
+                        let _ = resume::upsert_mark_many(&addr, &meta.0, meta.1, meta.2, meta.3, &received_indices);
+                        received_indices.clear();
+                    }
+                    // Ensure staged size matches expected
+                    let _ = crate::syncer::truncate_staging_to_size(&folder, &meta.0, meta.1);
+                    // Verify Merkle root of staged file before finalizing
+                    let staged = crate::syncer::staging_path(&folder, &meta.0);
+                    let mut ok = false;
+                    if let Ok(chunks_now) = crate::chunk::chunk_file(&staged) {
+                        let tree = crate::merkle::build_merkle(&chunks_now);
+                        let root_now = crate::merkle::root_hash(&tree);
+                        if root_now == meta.3 { ok = true; }
+                    }
+                    if ok {
+                        let _ = crate::syncer::finalize_staging(&folder, &meta.0);
+                        // clear resume entry on completion
+                        let _ = resume::clear(&addr, &meta.0, meta.3);
+                    } else {
+                        println!("Warning: Merkle root mismatch for {}. Kept staged file; will not finalize.", meta.0);
+                    }
                     println!("\nDone.");
                     break;
                 }
@@ -166,30 +199,53 @@ async fn recv_msg(recv: &mut RecvStream) -> Result<Option<Msg>> {
     Ok(Some(crate::protocol::decode(&buf)))
 }
 
-fn make_client_config_insecure() -> Result<quinn::ClientConfig> {
-    // For prototype: accept any certificate (DANGEROUS).
+fn make_client_config_pinned(addr: String, expected: Option<String>, accept_first: bool) -> Result<quinn::ClientConfig> {
     let roots = RootCertStore::empty();
     let mut crypto = RustlsClientConfig::builder()
         .with_safe_defaults()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    crypto.dangerous().set_certificate_verifier(Arc::new(NoVerifier));
+    crypto.dangerous().set_certificate_verifier(Arc::new(PinVerifier { addr, expected, accept_first }));
     let crypto = Arc::new(crypto);
     Ok(quinn::ClientConfig::new(crypto))
 }
 
-struct NoVerifier;
-impl rustls::client::ServerCertVerifier for NoVerifier {
+struct PinVerifier {
+    addr: String,
+    expected: Option<String>,
+    accept_first: bool,
+}
+
+impl ServerCertVerifier for PinVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::Certificate,
+        end_entity: &rustls::Certificate,
         _intermediates: &[rustls::Certificate],
         _server_name: &rustls::ServerName,
         _scts: &mut dyn Iterator<Item=&[u8]>,
         _ocsp_response: &[u8],
         _now: std::time::SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::ServerCertVerified::assertion())
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let fp = trust::sha256_hex(&end_entity.0);
+        match self.expected.as_ref() {
+            Some(exp) => {
+                if exp.eq_ignore_ascii_case(&fp) {
+                    return Ok(ServerCertVerified::assertion());
+                }
+                return Err(rustls::Error::General(format!("fingerprint mismatch: expected {}, got {}", exp, fp)));
+            }
+            None => {
+                if self.accept_first {
+                    // Try to persist; ignore errors here, still accept
+                    let _ = trust::set(&self.addr, &fp);
+                    return Ok(ServerCertVerified::assertion());
+                }
+                return Err(rustls::Error::General(format!(
+                    "untrusted server {} with fingerprint {}. Re-run with --accept-first or --fingerprint {}",
+                    self.addr, fp, fp
+                )));
+            }
+        }
     }
 }
 

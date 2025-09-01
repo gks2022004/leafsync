@@ -13,10 +13,14 @@ quinn = "0.10"
 rcgen = "0.11"
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 walkdir = "2"
 directories = "5"
+axum = { version = "0.7", features = ["http1", "http2", "tokio"] }
+hyper = { version = "1", features = ["http1", "http2"] }
+tower = "0.4"
 
 [profile.release]
 codegen-units = 1
