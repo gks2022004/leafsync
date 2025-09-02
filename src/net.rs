@@ -50,7 +50,7 @@ async fn handle_connection_server(folder: PathBuf, conn: quinn::Connecting) -> R
             let files: Vec<FileSummary> = summaries.iter().map(|(s, _)| s.clone()).collect();
             send_msg(&mut send, &Msg::Summary { files }).await?;
 
-            // Then serve per-file requests
+            // Then serve per-file requests and accept client-initiated pushes
             loop {
         match recv_msg(&mut recv).await? {
                     Some(Msg::RequestFile { rel_path }) => {
@@ -60,6 +60,40 @@ async fn handle_connection_server(folder: PathBuf, conn: quinn::Connecting) -> R
                         let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
                         let chunk_hashes: Vec<[u8; 32]> = chunks.iter().map(|c| c.hash).collect();
                         send_msg(&mut send, &Msg::FileMeta { rel_path: rel_path.clone(), size, chunk_count: chunks.len() as u64, root: merkle_root_from_chunks(&chunks), chunk_hashes }).await?;
+                    }
+                    Some(Msg::FileMeta { rel_path, size, chunk_count, root, chunk_hashes }) => {
+                        println!("Incoming push offer for {} ({} chunks)", rel_path, chunk_count);
+                        let abs = folder.join(&rel_path);
+                        let local_chunks: Vec<ChunkInfo> = if abs.exists() { chunk_file(&abs)? } else { Vec::new() };
+                        let need = crate::syncer::diff_needed_indices(&local_chunks, &chunk_hashes);
+                        // Request needed chunks from client
+                        send_msg(&mut send, &Msg::RequestChunks { rel_path: rel_path.clone(), indices: need.clone() }).await?;
+                        // Receive the chunk data then Done
+                        let mut received: Vec<u64> = Vec::new();
+                        loop {
+                            match recv_msg(&mut recv).await? {
+                                Some(Msg::ChunkData { rel_path: rp, index, data }) if rp == rel_path => {
+                                    let _ = crate::syncer::apply_chunk_staging(&folder, &rel_path, index, &data)?;
+                                    received.push(index);
+                                }
+                                Some(Msg::Done) => {
+                                    // finalize
+                                    let _ = crate::syncer::truncate_staging_to_size(&folder, &rel_path, size);
+                                    // verify and finalize
+                                    let staged = crate::syncer::staging_path(&folder, &rel_path);
+                                    let mut ok = false;
+                                    if let Ok(chunks_now) = crate::chunk::chunk_file(&staged) {
+                                        let tree = crate::merkle::build_merkle(&chunks_now);
+                                        let root_now = crate::merkle::root_hash(&tree);
+                                        if root_now == root { ok = true; }
+                                    }
+                                    if ok { let _ = crate::syncer::finalize_staging(&folder, &rel_path); }
+                                    else { println!("Push verify failed for {}", rel_path); }
+                                    break;
+                                }
+                                other => { if other.is_none() { break; } }
+                            }
+                        }
                     }
                     Some(Msg::RequestChunks { rel_path, indices }) => {
             println!("RequestChunks: {} ({} indices)", rel_path, indices.len());
@@ -93,6 +127,7 @@ pub async fn run_client(addr: String, folder: PathBuf, accept_first: bool, finge
     let connection = endpoint.connect(server_addr, "localhost")?.await?;
     let (mut send, mut recv) = connection.open_bi().await?;
     println!("Opened bi stream to server");
+    crate::status::set_active(true).await;
 
     // version negotiation: send first, then expect server's version
     send_msg(&mut send, &Msg::Version { major: 1, minor: 0 }).await?;
@@ -109,6 +144,7 @@ pub async fn run_client(addr: String, folder: PathBuf, accept_first: bool, finge
     // for each remote file, compare and request missing
     for remote in summary {
         println!("Syncing {} ({} chunks)", remote.rel_path, remote.chunk_count);
+    crate::status::start_file(&remote.rel_path, remote.size).await;
     send_msg(&mut send, &Msg::RequestFile { rel_path: remote.rel_path.clone() }).await?;
         let meta = match recv_msg(&mut recv).await? {
             Some(Msg::FileMeta { rel_path, size, chunk_count, root, chunk_hashes }) => (rel_path, size, chunk_count, root, chunk_hashes),
@@ -131,12 +167,15 @@ pub async fn run_client(addr: String, folder: PathBuf, accept_first: bool, finge
         send_msg(&mut send, &Msg::RequestChunks { rel_path: meta.0.clone(), indices: need.clone() }).await?;
         // receive chunks until Done
         let mut received_indices: Vec<u64> = Vec::new();
+    let mut bytes_received: u64 = 0;
         loop {
             match recv_msg(&mut recv).await? {
                 Some(Msg::ChunkData { rel_path, index, data }) => {
                     // Write into staging area for atomic finalize
                     let _ = crate::syncer::apply_chunk_staging(&folder, &rel_path, index, &data)?;
                     received_indices.push(index);
+            bytes_received = bytes_received.saturating_add(data.len() as u64);
+            crate::status::progress(bytes_received).await;
             print!(". ");
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
@@ -159,8 +198,10 @@ pub async fn run_client(addr: String, folder: PathBuf, accept_first: bool, finge
                         let _ = crate::syncer::finalize_staging(&folder, &meta.0);
                         // clear resume entry on completion
                         let _ = resume::clear(&addr, &meta.0, meta.3);
+                        crate::status::file_done(true, "finalized").await;
                     } else {
                         println!("Warning: Merkle root mismatch for {}. Kept staged file; will not finalize.", meta.0);
+                        crate::status::file_done(false, "merkle_mismatch").await;
                     }
                     println!("\nDone.");
                     break;
@@ -171,8 +212,34 @@ pub async fn run_client(addr: String, folder: PathBuf, accept_first: bool, finge
         }
     }
 
+    // Push phase: offer local files to server so it can request missing chunks
+    let locals = syncer::all_summaries(&folder)?;
+    for (sum, chunks) in locals {
+        // announce local file
+        let chunk_hashes: Vec<[u8;32]> = chunks.iter().map(|c| c.hash).collect();
+        send_msg(&mut send, &Msg::FileMeta { rel_path: sum.rel_path.clone(), size: sum.size, chunk_count: sum.chunk_count, root: sum.root, chunk_hashes }).await?;
+        // wait either for RequestChunks or Done/next
+        let mut to_send: Option<Vec<u64>> = None;
+        match recv_msg(&mut recv).await? {
+            Some(Msg::RequestChunks { rel_path, indices }) if rel_path == sum.rel_path => {
+                to_send = Some(indices);
+            }
+            Some(Msg::Done) | None => {}
+            _ => {}
+        }
+        if let Some(indices) = to_send {
+            let abs = folder.join(&sum.rel_path);
+            for idx in indices {
+                let data = read_chunk(&abs, idx).unwrap_or_default();
+                send_msg(&mut send, &Msg::ChunkData { rel_path: sum.rel_path.clone(), index: idx, data }).await?;
+            }
+            send_msg(&mut send, &Msg::Done).await?;
+        }
+    }
+
     // signal done
     let _ = send_msg(&mut send, &Msg::Done).await;
+    crate::status::session_done(true, "client_done").await;
     Ok(())
 }
 

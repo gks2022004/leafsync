@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rubik's Cube Vision Solver & Pattern Finder</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Three.js for 3D rendering -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <!-- Kociemba solver (WASM) -->
+    <script src="https://cdn.jsdelivr.net/npm/js-kociemba@1.2.1/dist/kociemba.js"></script>
+    <!-- Lucide icons for UI -->
+    <script src="https://cdn.jsdelivr.net/npm/lucide-react@0.292.0/dist/lucide-react.min.js"></script>
+    
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        .solution-move {
+            display: inline-block;
+            padding: 0.5rem 0.75rem;
+            margin: 0.25rem;
+            border-radius: 0.375rem;
+            font-weight: 600;
+            font-size: 0.875rem;
+            line-height: 1.25rem;
+            text-align: center;
+            min-width: 40px;
+        }
+        .face-btn.active {
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.5);
+        }
+        .color-palette-btn.active {
+             transform: scale(1.1);
+             box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.8);
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex flex-col items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-6xl mx-auto bg-gray-800 rounded-2xl shadow-2xl p-4 sm:p-6 lg:p-8">
+        <header class="text-center mb-6">
+            <h1 class="text-3xl sm:text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500">Rubik's Cube Vision Solver</h1>
+            <p class="text-gray-400 mt-2">Use your camera to solve your cube, or create beautiful patterns.</p>
+        </header>
+
+        <!-- Main Content -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+
+            <!-- Left Panel: Camera / Pattern Controls -->
+            <div class="flex flex-col bg-gray-900/50 p-6 rounded-xl">
+                <!-- Mode Switcher -->
+                <div class="flex bg-gray-700 rounded-full p-1 mb-6">
+                    <button id="solver-mode-btn" class="w-1/2 py-2 text-sm font-semibold rounded-full bg-blue-600 shadow-md">Solver</button>
+                    <button id="pattern-mode-btn" class="w-1/2 py-2 text-sm font-semibold rounded-full text-gray-300">Manual Input</button>
+                </div>
+
+                <!-- Solver UI -->
+                <div id="solver-ui">
+                    <div class="relative w-full aspect-video bg-gray-900 rounded-lg overflow-hidden mb-4 shadow-lg">
+                        <video id="webcam" class="w-full h-full object-cover" autoplay playsinline muted></video>
+                        <div id="video-loading" class="absolute inset-0 flex items-center justify-center bg-gray-900/80"></div>
+                    </div>
+                    <p class="text-center text-gray-400 text-sm mb-4">Select a face below, point it at the camera, and click 'Scan Face'.</p>
+                    <div class="grid grid-cols-3 gap-2 mb-4">
+                        <button class="face-btn bg-white text-black p-3 rounded-lg font-bold" data-face="U">Up (U)</button>
+                        <button class="face-btn bg-orange-500 p-3 rounded-lg font-bold" data-face="L">Left (L)</button>
+                        <button class="face-btn bg-green-500 p-3 rounded-lg font-bold" data-face="F">Front (F)</button>
+                        <button class="face-btn bg-red-600 p-3 rounded-lg font-bold" data-face="R">Right (R)</button>
+                        <button class="face-btn bg-blue-600 p-3 rounded-lg font-bold" data-face="B">Back (B)</button>
+                        <button class="face-btn bg-yellow-400 text-black p-3 rounded-lg font-bold" data-face="D">Down (D)</button>
+                    </div>
+                    <button id="scan-btn" class="w-full bg-indigo-600 hover:bg-indigo-700 font-bold py-3 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 disabled:bg-gray-600 disabled:cursor-not-allowed" disabled>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-scan-line"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></svg>
+                        Scan Face
+                    </button>
+                </div>
+                
+                <!-- Pattern UI -->
+                <div id="pattern-ui" class="hidden">
+                    <p class="text-center text-gray-400 text-sm mb-4">Click on the 3D cube to paint the colors of your scrambled cube.</p>
+                     <div id="color-palette" class="grid grid-cols-6 gap-2 mb-4">
+                        <button class="color-palette-btn h-12 rounded-md border-2 border-transparent" style="background-color: white;" data-color="white"></button>
+                        <button class="color-palette-btn h-12 rounded-md border-2 border-transparent" style="background-color: #ffc400;" data-color="yellow"></button>
+                        <button class="color-palette-btn h-12 rounded-md border-2 border-transparent" style="background-color: #009b48;" data-color="green"></button>
+                        <button class="color-palette-btn h-12 rounded-md border-2 border-transparent" style="background-color: #0045ad;" data-color="blue"></button>
+                        <button class="color-palette-btn h-12 rounded-md border-2 border-transparent" style="background-color: #b71234;" data-color="red"></button>
+                        <button class="color-palette-btn h-12 rounded-md border-2 border-transparent" style="background-color: #ff5800;" data-color="orange"></button>
+                    </div>
+                    <p class="text-center text-gray-400 text-xs mb-4">Use your mouse to rotate the cube. Right-click/two-finger drag to pan.</p>
+                    <button id="reset-pattern-btn" class="w-full bg-gray-600 hover:bg-gray-700 font-bold py-3 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 mb-2">
+                        Reset to Solved
+                    </button>
+                </div>
+                
+                <!-- Action Buttons -->
+                <div class="mt-auto pt-6">
+                    <button id="action-btn" class="w-full bg-green-600 hover:bg-green-700 font-bold py-3 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 disabled:bg-gray-600 disabled:cursor-not-allowed" disabled>
+                        Solve Cube
+                    </button>
+                </div>
+
+            </div>
+
+            <!-- Right Panel: 3D Cube and Solution -->
+            <div class="flex flex-col bg-gray-900/50 p-6 rounded-xl min-h-[400px] lg:min-h-0">
+                <div id="cube-container" class="relative flex-grow w-full h-64 lg:h-auto rounded-lg cursor-grab active:cursor-grabbing">
+                    <div id="face-hover-label" class="hidden pointer-events-none absolute top-2 left-2 z-10 bg-gray-800/80 text-white text-xs px-2 py-1 rounded"></div>
+                </div>
+                <div id="solution-container" class="mt-6">
+                    <h3 class="font-bold text-lg mb-2 text-center">Solution</h3>
+                    <div id="solution-output" class="bg-gray-900 p-4 rounded-lg min-h-[100px] text-center text-gray-400 leading-relaxed overflow-x-auto">
+                        <p>Scan all 6 faces of your cube to see the solution here.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+    </div>
+    
+    <!-- Modal -->
+    <div id="modal" class="fixed inset-0 bg-black/70 flex items-center justify-center hidden z-50 p-4">
+        <div class="bg-gray-800 rounded-xl p-8 max-w-sm w-full text-center shadow-2xl">
+            <h2 id="modal-title" class="text-2xl font-bold mb-4"></h2>
+            <p id="modal-message" class="text-gray-300 mb-6"></p>
+            <button id="modal-close-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg">OK</button>
+        </div>
+    </div>
+
+
+    <script type="module">
+        // --- GEMINI API SETUP ---
+        const API_KEY = "AIzaSyD0zi1RMwb13EPHNpqXqre5_HMUSgIp_To"; // Provided by the environment
+
+        // --- 3D RENDERER SETUP (Three.js) ---
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 1000);
+        let cube3D = null;
+        let currentStream = null;
+
+        // --- KOCIEMBA SOLVER SETUP ---
+        let kociembaSolver = null;
+        let kociembaLoadPromise = null;
+        let kociembaScriptAttempted = false;
+
+    function loadExternalScript(url, timeoutMs = 8000) {
+            return new Promise((resolve, reject) => {
+                // Avoid duplicate loads of the same script
+                const existing = Array.from(document.getElementsByTagName('script')).some(s => (s.src || '').includes(url));
+                if (existing) return resolve(true);
+                const s = document.createElement('script');
+                s.src = url;
+                s.async = true;
+                let timedOut = false;
+                const to = setTimeout(() => {
+                    timedOut = true;
+                    reject(new Error('Script load timeout: ' + url));
+                }, timeoutMs);
+                s.onload = () => { if (!timedOut) { clearTimeout(to); resolve(true); } };
+                s.onerror = () => { if (!timedOut) { clearTimeout(to); reject(new Error('Script load failed: ' + url)); } };
+                document.head.appendChild(s);
+            });
+        }
+
+    async function tryLoadKociembaFromCDNs() {
+            if (kociembaScriptAttempted) return;
+            kociembaScriptAttempted = true;
+            const urls = [
+        // jsDelivr variants
+        'https://cdn.jsdelivr.net/npm/js-kociemba@1.2.1/dist/kociemba.js',
+        'https://cdn.jsdelivr.net/npm/js-kociemba@1.2.1/dist/kociemba.min.js',
+        'https://cdn.jsdelivr.net/npm/js-kociemba@1.2.1/dist/index.umd.js',
+        // unpkg variants
+        'https://unpkg.com/js-kociemba@1.2.1/dist/kociemba.js',
+        'https://unpkg.com/js-kociemba@1.2.1/dist/kociemba.min.js',
+                'https://unpkg.com/js-kociemba@1.2.1/dist/index.umd.js',
+                // local fallbacks (place file in project to avoid CDN)
+                './vendor/kociemba.js',
+                './kociemba.js'
+            ];
+            for (const url of urls) {
+                try {
+            console.log('[LeafSync] Trying Kociemba CDN:', url);
+            await loadExternalScript(url, 8000);
+                    return;
+                } catch (e) {
+                    console.warn('Kociemba CDN fallback failed:', e.message || e);
+                }
+            }
+        }
+
+        async function loadKociemba(maxWaitMs = 10000) {
+            if (kociembaSolver) return true;
+            if (!kociembaLoadPromise) {
+                kociembaLoadPromise = (async () => {
+                    const start = Date.now();
+                    // If the global isn't present quickly, start loading from fallback CDNs in the background
+                    const kickFallback = setTimeout(() => {
+                        const lib = (window && (window.kociemba || window.Kociemba)) || (globalThis && globalThis.kociemba);
+                        if (!lib) tryLoadKociembaFromCDNs();
+                    }, 300);
+                    while (Date.now() - start < maxWaitMs) {
+                        const lib = (window && (window.kociemba || window.Kociemba)) || (globalThis && globalThis.kociemba);
+                        if (lib) {
+                            try {
+                                if (typeof lib.init === 'function') {
+                                    const solver = await lib.init();
+                                    if (solver && typeof solver.solve === 'function') {
+                                        kociembaSolver = solver;
+                                        clearTimeout(kickFallback);
+                                        return true;
+                                    }
+                                }
+                                if (typeof lib.solve === 'function') {
+                                    kociembaSolver = lib;
+                                    clearTimeout(kickFallback);
+                                    return true;
+                                }
+                            } catch (e) {
+                                console.warn('Kociemba init error:', e);
+                            }
+                        }
+                        await new Promise(r => setTimeout(r, 200));
+                    }
+                    clearTimeout(kickFallback);
+                    console.warn('Kociemba solver failed to load within timeout.');
+                    return false;
+                })();
+            }
+            return kociembaLoadPromise;
+        }
+
+        // --- APPLICATION STATE ---
+        const state = {
+            mode: 'solver', // 'solver' or 'pattern'
+            activeFace: null,
+            activeColor: 'white',
+            scannedFaces: {},
+            isScanning: false,
+        };
+
+        const CUBE_COLORS = {
+            white:  0xffffff,
+            yellow: 0xffc400,
+            green:  0x009b48,
+            blue:   0x0045ad,
+            red:    0xb71234,
+            orange: 0xff5800,
+        };
+        const FACE_ORDER = ['U', 'R', 'F', 'D', 'L', 'B'];
+
+        // --- DOM ELEMENTS ---
+        const DOMElements = {
+            webcam: document.getElementById('webcam'),
+            videoLoading: document.getElementById('video-loading'),
+            scanBtn: document.getElementById('scan-btn'),
+            actionBtn: document.getElementById('action-btn'),
+            solverModeBtn: document.getElementById('solver-mode-btn'),
+            patternModeBtn: document.getElementById('pattern-mode-btn'),
+            solverUI: document.getElementById('solver-ui'),
+            patternUI: document.getElementById('pattern-ui'),
+            cubeContainer: document.getElementById('cube-container'),
+            solutionOutput: document.getElementById('solution-output'),
+            faceBtns: document.querySelectorAll('.face-btn'),
+            colorPalette: document.getElementById('color-palette'),
+            resetPatternBtn: document.getElementById('reset-pattern-btn'),
+            modal: document.getElementById('modal'),
+            modalTitle: document.getElementById('modal-title'),
+            modalMessage: document.getElementById('modal-message'),
+            modalCloseBtn: document.getElementById('modal-close-btn'),
+            faceHoverLabel: document.getElementById('face-hover-label'),
+        };
+
+        // --- CORE LOGIC ---
+
+        /** Initializes the entire application */
+        function init() {
+            // Kick off Kociemba loading in the background
+            loadKociemba();
+            init3D();
+            initCamera();
+            initEventListeners();
+            updateUIMode();
+            updateActiveColor('white');
+        }
+
+        /** Sets up the 3D scene and cube */
+        function init3D() {
+            const container = DOMElements.cubeContainer;
+            const size = Math.min(container.clientWidth, container.clientHeight);
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            container.appendChild(renderer.domElement);
+
+            camera.position.set(4, 4, 4);
+            camera.lookAt(0, 0, 0);
+
+            const controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.1;
+            
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+            directionalLight.position.set(1, 2, 3);
+            scene.add(directionalLight);
+
+            createCube3D();
+            
+            function animate() {
+                requestAnimationFrame(animate);
+                controls.update();
+                renderer.render(scene, camera);
+            }
+            animate();
+            
+            window.addEventListener('resize', () => {
+                const w = container.clientWidth;
+                const h = Math.max(200, window.innerHeight * 0.4);
+                camera.aspect = w / h;
+                camera.updateProjectionMatrix();
+                renderer.setSize(w, h);
+            });
+        }
+        
+        /** Creates the 3D representation of the Rubik's Cube */
+        function createCube3D() {
+            if (cube3D) scene.remove(cube3D);
+
+            cube3D = new THREE.Group();
+            const pieceSize = 1;
+            const gap = 0.05;
+            const offset = (pieceSize + gap);
+
+            const geometry = new THREE.BoxGeometry(pieceSize, pieceSize, pieceSize);
+
+            for (let x = -1; x <= 1; x++) {
+                for (let y = -1; y <= 1; y++) {
+                    for (let z = -1; z <= 1; z++) {
+                         if (x === 0 && y === 0 && z === 0) continue;
+
+                        const materials = [
+                            new THREE.MeshLambertMaterial({ color: 0x333333 }), // right
+                            new THREE.MeshLambertMaterial({ color: 0x333333 }), // left
+                            new THREE.MeshLambertMaterial({ color: 0x333333 }), // top
+                            new THREE.MeshLambertMaterial({ color: 0x333333 }), // bottom
+                            new THREE.MeshLambertMaterial({ color: 0x333333 }), // front
+                            new THREE.MeshLambertMaterial({ color: 0x333333 }), // back
+                        ];
+                        const piece = new THREE.Mesh(geometry, materials);
+                        piece.position.set(x * offset, y * offset, z * offset);
+                        piece.userData = { x, y, z };
+                        cube3D.add(piece);
+                    }
+                }
+            }
+            scene.add(cube3D);
+            setCubeToSolved();
+        }
+
+        /** Sets the 3D cube to its solved state colors */
+        function setCubeToSolved() {
+            const solvedState = {
+                U: Array(9).fill('white'),
+                L: Array(9).fill('orange'),
+                F: Array(9).fill('green'),
+                R: Array(9).fill('red'),
+                B: Array(9).fill('blue'),
+                D: Array(9).fill('yellow'),
+            };
+            state.scannedFaces = JSON.parse(JSON.stringify(solvedState));
+            update3DCubeColors();
+        }
+        
+        /** Updates the 3D cube colors based on the current state.scannedFaces */
+        function update3DCubeColors() {
+             const faceMapping = {
+                'R': { axis: 'x', val: 1, color: CUBE_COLORS.red },
+                'L': { axis: 'x', val: -1, color: CUBE_COLORS.orange },
+                'U': { axis: 'y', val: 1, color: CUBE_COLORS.white },
+                'D': { axis: 'y', val: -1, color: CUBE_COLORS.yellow },
+                'F': { axis: 'z', val: 1, color: CUBE_COLORS.green },
+                'B': { axis: 'z', val: -1, color: CUBE_COLORS.blue },
+            };
+            
+            cube3D.children.forEach(piece => {
+                piece.material.forEach(m => m.color.set(0x333333));
+            });
+
+            for (const [faceName, colors] of Object.entries(state.scannedFaces)) {
+                if (!colors) continue;
+                const mapping = faceMapping[faceName];
+                const piecesOnFace = cube3D.children.filter(p => p.userData[mapping.axis] === mapping.val);
+                
+                piecesOnFace.forEach(piece => {
+                    const materialIndex = getMaterialIndexForFace(piece, faceName);
+                    
+                    const {x, y, z} = piece.userData;
+                    let stickerIndex;
+
+                    // This mapping from 3D coordinates to 2D sticker index is complex but crucial.
+                    // It translates the position of a piece on a face to the 0-8 index
+                    // of the color array, assuming a standard "face held up to you" view.
+                    if (faceName === 'U') stickerIndex = (z+1)*3 + (x+1);
+                    else if (faceName === 'D') stickerIndex = (1-z)*3 + (x+1);
+                    else if (faceName === 'F') stickerIndex = (1-y)*3 + (x+1);
+                    else if (faceName === 'B') stickerIndex = (1-y)*3 + (1-x);
+                    else if (faceName === 'R') stickerIndex = (1-y)*3 + (1-z);
+                    else if (faceName === 'L') stickerIndex = (1-y)*3 + (z+1);
+
+                    const colorName = colors[stickerIndex];
+                    if (colorName && CUBE_COLORS[colorName]) {
+                        piece.material[materialIndex].color.set(CUBE_COLORS[colorName]);
+                    }
+                });
+            }
+        }
+        
+        /** Utility to get the correct material index for a sticker */
+        function getMaterialIndexForFace(piece, faceName) {
+            const { x, y, z } = piece.userData;
+            if (faceName === 'R' && x > 0) return 0;
+            if (faceName === 'L' && x < 0) return 1;
+            if (faceName === 'U' && y > 0) return 2;
+            if (faceName === 'D' && y < 0) return 3;
+            if (faceName === 'F' && z > 0) return 4;
+            if (faceName === 'B' && z < 0) return 5;
+            return -1;
+        }
+
+        /** Initializes webcam stream */
+        async function initCamera() {
+            const video = DOMElements.webcam;
+            const loading = DOMElements.videoLoading;
+
+            if (!navigator.mediaDevices?.getUserMedia) {
+                console.error("getUserMedia not supported on this origin.");
+                loading.innerHTML = '<p class="text-red-400">Camera API not available. Use Chrome/Edge and open via http://localhost or HTTPS.</p>';
+                return;
+            }
+
+            // Stop any existing stream
+            if (currentStream) {
+                currentStream.getTracks().forEach(t => t.stop());
+                currentStream = null;
+            }
+
+            const constraintsList = [
+                { video: { facingMode: { exact: 'environment' } } },
+                { video: { facingMode: 'environment' } },
+                { video: { facingMode: 'user' } },
+                { video: true },
+            ];
+
+            try {
+                let stream = null;
+                let lastErr = null;
+                for (const c of constraintsList) {
+                    try {
+                        stream = await navigator.mediaDevices.getUserMedia(c);
+                        break;
+                    } catch (e) {
+                        lastErr = e;
+                    }
+                }
+                if (!stream) throw lastErr;
+
+                currentStream = stream;
+
+                video.srcObject = stream;
+                video.muted = true;
+                video.playsInline = true;
+
+                // Ensure playback on some browsers
+                try { await video.play(); } catch (_) {}
+
+                video.onloadedmetadata = () => {
+                    loading.classList.add('hidden');
+                };
+            } catch (err) {
+                console.error("Camera error:", err);
+                let msg = 'Could not access the webcam.';
+                switch (err?.name) {
+                    case 'NotAllowedError':
+                    case 'SecurityError':
+                        msg = 'Camera permission blocked. Allow camera access and reload.';
+                        break;
+                    case 'NotFoundError':
+                        msg = 'No camera device found.';
+                        break;
+                    case 'NotReadableError':
+                        msg = 'Camera is in use by another app.';
+                        break;
+                    default:
+                        msg = 'Camera failed to start. Try a different browser.';
+                }
+                showModal("Camera Error", msg + " Also open this page via http://localhost (not file://).");
+                loading.innerHTML = `<p class="text-red-400">${msg}</p>`;
+            }
+        }
+        
+        /** Binds all event listeners */
+        function initEventListeners() {
+            DOMElements.solverModeBtn.addEventListener('click', () => switchMode('solver'));
+            DOMElements.patternModeBtn.addEventListener('click', () => switchMode('pattern'));
+
+            DOMElements.faceBtns.forEach(btn => {
+                btn.addEventListener('click', () => setActiveFace(btn.dataset.face));
+            });
+            DOMElements.scanBtn.addEventListener('click', handleScan);
+            DOMElements.actionBtn.addEventListener('click', handleAction);
+            DOMElements.resetPatternBtn.addEventListener('click', () => {
+                setCubeToSolved();
+                DOMElements.solutionOutput.innerHTML = `<p>Cube has been reset. Create a new pattern!</p>`;
+            });
+
+            Array.from(DOMElements.colorPalette.querySelectorAll('.color-palette-btn')).forEach(btn => {
+                btn.addEventListener('click', () => updateActiveColor(btn.dataset.color));
+            });
+
+            DOMElements.cubeContainer.addEventListener('click', onCubeClick, false);
+            DOMElements.cubeContainer.addEventListener('mousemove', onCubeHover, false);
+            DOMElements.cubeContainer.addEventListener('mouseleave', () => {
+                if (DOMElements.faceHoverLabel) DOMElements.faceHoverLabel.classList.add('hidden');
+            }, false);
+            DOMElements.modalCloseBtn.addEventListener('click', hideModal);
+        }
+
+        /** Main action handler for 'Solve' or 'Get Moves' */
+        async function handleAction() {
+            solveCube();
+        }
+        
+        /** Handles the scan button click event */
+        async function handleScan() {
+            if (!state.activeFace || state.isScanning) return;
+            
+            state.isScanning = true;
+            setLoadingState(DOMElements.scanBtn, true, 'Scanning...');
+            DOMElements.solutionOutput.innerHTML = `<p>Scanning ${state.activeFace} face... AI is analyzing the colors.</p>`;
+
+            const canvas = document.createElement('canvas');
+            canvas.width = DOMElements.webcam.videoWidth;
+            canvas.height = DOMElements.webcam.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(DOMElements.webcam, 0, 0, canvas.width, canvas.height);
+            const imageData = canvas.toDataURL('image/png').split(',')[1];
+            
+            try {
+                const colors = await callGeminiVision(imageData);
+                if (colors && colors.length === 9) {
+                    state.scannedFaces[state.activeFace] = colors;
+                    update3DCubeColors();
+                    checkCompletion();
+                    DOMElements.solutionOutput.innerHTML = `<p class="text-green-400">Successfully scanned ${state.activeFace} face!</p>`;
+                    const currentFaceBtn = document.querySelector(`.face-btn[data-face="${state.activeFace}"]`);
+                    currentFaceBtn.classList.add("!bg-green-500", "border-2", "border-white");
+
+                } else {
+                    throw new Error("Invalid color data received.");
+                }
+            } catch (error) {
+                console.error("Scan error:", error);
+                showModal("Scan Failed", `Could not determine the colors for the ${state.activeFace} face. Please try again with better lighting and a clearer view.`);
+                DOMElements.solutionOutput.innerHTML = `<p class="text-red-400">Scan failed for ${state.activeFace} face. Please try again.</p>`;
+            } finally {
+                state.isScanning = false;
+                setLoadingState(DOMElements.scanBtn, false, 'Scan Face');
+            }
+        }
+
+        // --- HOVER LABEL HELPERS ---
+        function onCubeHover(event) {
+            const rect = DOMElements.cubeContainer.getBoundingClientRect();
+            const mouse = new THREE.Vector2();
+            mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(cube3D.children);
+
+            if (!intersects.length) {
+                if (DOMElements.faceHoverLabel) DOMElements.faceHoverLabel.classList.add('hidden');
+                return;
+            }
+
+            const piece = intersects[0].object;
+            const normal = intersects[0].face.normal.clone();
+            normal.transformDirection(piece.matrixWorld);
+
+            let faceName;
+            if (Math.abs(normal.y) > 0.9) faceName = normal.y > 0 ? 'U' : 'D';
+            else if (Math.abs(normal.z) > 0.9) faceName = normal.z > 0 ? 'F' : 'B';
+            else if (Math.abs(normal.x) > 0.9) faceName = normal.x > 0 ? 'R' : 'L';
+
+            const pretty = { U: 'Top (U)', D: 'Bottom (D)', F: 'Front (F)', B: 'Back (B)', R: 'Right (R)', L: 'Left (L)' }[faceName] || '';
+            if (DOMElements.faceHoverLabel) {
+                DOMElements.faceHoverLabel.textContent = pretty;
+                DOMElements.faceHoverLabel.classList.remove('hidden');
+            }
+        }
+
+        /** Calls Gemini API to analyze the cube face image */
+        async function callGeminiVision(base64ImageData) {
+            const model = 'gemini-2.5-flash-preview-05-20';
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${API_KEY}`;
+            const prompt = `You are a Rubik's Cube face scanner. Analyze the image of a single face of a 3x3 Rubik's Cube. Identify the 9 colors on the stickers. The only possible colors are red, green, blue, orange, white, and yellow. Return a single JSON array of 9 color names in English, in lowercase, reading from top-left to bottom-right, row by row. Example: ["red", "white", "blue", "green", "yellow", "orange", "red", "white", "blue"]. Do not include any other text, markdown formatting, or explanation in your response. Just the raw JSON array.`;
+
+            const payload = {
+                contents: [{
+                    parts: [
+                        { text: prompt },
+                        { inlineData: { mimeType: "image/png", data: base64ImageData } }
+                    ]
+                }],
+            };
+
+            // Using fetch with retry logic
+            let response;
+            for (let i = 0; i < 3; i++) {
+                try {
+                    response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (response.ok) break;
+                } catch (error) {
+                    if (i === 2) throw error;
+                    await new Promise(res => setTimeout(res, 1000 * (i + 1)));
+                }
+            }
+
+            if (!response.ok) {
+                throw new Error(`API call failed with status: ${response.status}`);
+            }
+
+            const result = await response.json();
+            const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (!text) {
+                 throw new Error("No text content in API response.");
+            }
+            // Clean up potential markdown code block
+            const cleanedText = text.replace(/```json|```/g, "").trim();
+            return JSON.parse(cleanedText);
+        }
+
+        /** Converts the scanned color state to the Kociemba solver string */
+        function convertStateToSolverString() {
+            // 1. Identify center colors to map colors to faces (U, R, F, etc.)
+            const centerColors = {
+                U: state.scannedFaces.U[4],
+                R: state.scannedFaces.R[4],
+                F: state.scannedFaces.F[4],
+                D: state.scannedFaces.D[4],
+                L: state.scannedFaces.L[4],
+                B: state.scannedFaces.B[4],
+            };
+            
+            const colorToFaceMap = {};
+            for (const [face, color] of Object.entries(centerColors)) {
+                if(!color) return null; // Not all faces scanned
+                colorToFaceMap[color] = face;
+            }
+
+            // 2. Build the string in URFDLB order
+            let solverString = '';
+            for (const face of FACE_ORDER) {
+                const colors = state.scannedFaces[face];
+                if (!colors) return null; // Should not happen if we check completion
+                solverString += colors.map(color => colorToFaceMap[color]).join('');
+            }
+            return solverString;
+        }
+
+        /** Solves the cube and displays the solution */
+        async function solveCube() {
+            // Ensure solver is loaded before proceeding
+            if (!kociembaSolver) {
+                const ok = await loadKociemba();
+                if (!ok || !kociembaSolver) {
+                    showModal("Solver Not Ready", "The solving engine is still loading. Please check your network or retry in a moment.");
+                    return;
+                }
+            }
+            
+            setLoadingState(DOMElements.actionBtn, true, 'Solving...');
+            DOMElements.solutionOutput.innerHTML = `<p>Calculating solution...</p>`;
+            
+            setTimeout(() => { // Allow UI to update
+                const solverString = convertStateToSolverString();
+                if (!solverString) {
+                    showModal("Error", "Could not create a valid cube state. Make sure all faces are scanned correctly.");
+                    setLoadingState(DOMElements.actionBtn, false, 'Solve Cube');
+                    return;
+                }
+                
+                try {
+                    const solution = typeof kociembaSolver.solve === 'function'
+                        ? kociembaSolver.solve(solverString)
+                        : kociembaSolver(solverString);
+                    displaySolution(solution);
+                } catch (error) {
+                    console.error("Solver error: ", error);
+                    showModal("Unsolvable State", "The cube state is invalid or unsolvable. This can happen due to a scanning error or if the cube has been physically reassembled incorrectly (e.g., a flipped edge). Please rescan carefully.");
+                    DOMElements.solutionOutput.innerHTML = `<p class="text-red-400">This cube state is unsolvable. Please check your scan.</p>`;
+                } finally {
+                    setLoadingState(DOMElements.actionBtn, false, 'Solve Cube');
+                }
+            }, 50);
+        }
+
+
+        
+        /** Displays the solution in a formatted way */
+        function displaySolution(solution, title = "Solution found!") {
+            DOMElements.solutionOutput.innerHTML = `<h4 class="font-semibold text-white mb-3">${title}</h4>`;
+            const moves = solution.split(' ');
+            moves.forEach(move => {
+                const moveEl = document.createElement('span');
+                moveEl.textContent = move;
+                moveEl.className = 'solution-move';
+                
+                let colorClass = 'bg-gray-700 text-white';
+                if (['U', 'D'].some(f => move.startsWith(f))) colorClass = 'bg-yellow-400 text-black';
+                if (['F', 'B'].some(f => move.startsWith(f))) colorClass = 'bg-green-500 text-white';
+                if (['R', 'L'].some(f => move.startsWith(f))) colorClass = 'bg-red-500 text-white';
+                moveEl.classList.add(...colorClass.split(' '));
+                
+                DOMElements.solutionOutput.appendChild(moveEl);
+            });
+        }
+        
+        /** Handles clicking on the 3D cube in pattern mode */
+        function onCubeClick(event) {
+            if (state.mode !== 'pattern') return;
+
+            const rect = DOMElements.cubeContainer.getBoundingClientRect();
+            const mouse = new THREE.Vector2();
+            mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+            
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(mouse, camera);
+
+            const intersects = raycaster.intersectObjects(cube3D.children);
+
+            if (intersects.length > 0) {
+                const piece = intersects[0].object;
+                const normal = intersects[0].face.normal.clone();
+                normal.transformDirection(piece.matrixWorld);
+
+                const { x, y, z } = piece.userData;
+                let faceName;
+                if (Math.abs(normal.y) > 0.9) faceName = normal.y > 0 ? 'U' : 'D';
+                else if (Math.abs(normal.z) > 0.9) faceName = normal.z > 0 ? 'F' : 'B';
+                else if (Math.abs(normal.x) > 0.9) faceName = normal.x > 0 ? 'R' : 'L';
+
+                let stickerIndex;
+                if (faceName === 'U') stickerIndex = (z+1)*3 + (x+1);
+                else if (faceName === 'D') stickerIndex = (1-z)*3 + (x+1);
+                else if (faceName === 'F') stickerIndex = (1-y)*3 + (x+1);
+                else if (faceName === 'B') stickerIndex = (1-y)*3 + (1-x);
+                else if (faceName === 'R') stickerIndex = (1-y)*3 + (1-z);
+                else if (faceName === 'L') stickerIndex = (1-y)*3 + (z+1);
+
+                // Update the state and visuals
+                state.scannedFaces[faceName][stickerIndex] = state.activeColor;
+                update3DCubeColors();
+                checkCompletion();
+            }
+        }
+
+        // --- UI & STATE HELPERS ---
+
+        /** Switches between 'solver' and 'pattern' mode */
+        function switchMode(newMode) {
+            state.mode = newMode;
+            updateUIMode();
+        }
+
+        /** Updates the UI elements based on the current mode */
+        function updateUIMode() {
+            if (state.mode === 'solver') {
+                DOMElements.solverModeBtn.classList.add('bg-blue-600', 'shadow-md');
+                DOMElements.solverModeBtn.classList.remove('text-gray-300');
+                DOMElements.patternModeBtn.classList.remove('bg-blue-600', 'shadow-md');
+                DOMElements.patternModeBtn.classList.add('text-gray-300');
+                DOMElements.solverUI.classList.remove('hidden');
+                DOMElements.patternUI.classList.add('hidden');
+                DOMElements.actionBtn.textContent = 'Solve Cube';
+                DOMElements.solutionOutput.innerHTML = '<p>Scan all 6 faces of your cube to see the solution here.</p>';
+                state.scannedFaces = {};
+                DOMElements.faceBtns.forEach(b => b.classList.remove("!bg-green-500", "border-2", "border-white"));
+                createCube3D();
+            } else { // pattern mode
+                DOMElements.patternModeBtn.classList.add('bg-blue-600', 'shadow-md');
+                DOMElements.patternModeBtn.classList.remove('text-gray-300');
+                DOMElements.solverModeBtn.classList.remove('bg-blue-600', 'shadow-md');
+                DOMElements.solverModeBtn.classList.add('text-gray-300');
+                DOMElements.patternUI.classList.remove('hidden');
+                DOMElements.solverUI.classList.add('hidden');
+                DOMElements.actionBtn.textContent = 'Solve Cube';
+                DOMElements.solutionOutput.innerHTML = '<p>Paint your cube state on the 3D model and click "Solve Cube".</p>';
+                setCubeToSolved();
+            }
+            checkCompletion();
+        }
+
+        /** Sets the currently active face for scanning */
+        function setActiveFace(face) {
+            state.activeFace = face;
+            DOMElements.scanBtn.disabled = false;
+            DOMElements.faceBtns.forEach(btn => {
+                if (btn.dataset.face === face) {
+                    btn.classList.add('active');
+                } else {
+                    btn.classList.remove('active');
+                }
+            });
+            DOMElements.scanBtn.textContent = `Scan ${face} Face`;
+        }
+        
+        /** Updates the active color for pattern painting */
+        function updateActiveColor(color) {
+            state.activeColor = color;
+            Array.from(DOMElements.colorPalette.querySelectorAll('.color-palette-btn')).forEach(btn => {
+                if (btn.dataset.color === color) btn.classList.add('active');
+                else btn.classList.remove('active');
+            });
+        }
+        
+        /** Checks if all 6 faces have been scanned/defined and enables action button */
+        function checkCompletion() {
+            const completed = Object.keys(state.scannedFaces).length === 6 &&
+                              Object.values(state.scannedFaces).every(face => face && face.length === 9);
+
+            DOMElements.actionBtn.disabled = !completed;
+        }
+        
+        /** Sets the loading state of a button */
+        function setLoadingState(button, isLoading, text) {
+            button.disabled = isLoading;
+            if (isLoading) {
+                button.innerHTML = `
+                    <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    ${text}
+                `;
+            } else {
+                button.textContent = text;
+            }
+        }
+        
+        /** Shows the modal dialog */
+        function showModal(title, message) {
+            DOMElements.modalTitle.textContent = title;
+            DOMElements.modalMessage.textContent = message;
+            DOMElements.modal.classList.remove('hidden');
+        }
+
+        /** Hides the modal dialog */
+        function hideModal() {
+            DOMElements.modal.classList.add('hidden');
+        }
+
+        // --- START THE APP ---
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
+

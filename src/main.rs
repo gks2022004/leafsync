@@ -7,6 +7,8 @@ mod identity;
 mod trust;
 mod resume;
 mod web;
+mod status;
+mod watch;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -41,8 +43,15 @@ enum Commands {
     /// Manage trusted server fingerprints (TOFU)
     #[command(subcommand)]
     Trust(TrustCmd),
-    /// Watch a folder and sync on changes (placeholder)
-    Watch { folder: PathBuf },
+    /// Watch a folder and sync on changes
+    Watch {
+        folder: PathBuf,
+        addr: String,
+        #[arg(long)]
+        accept_first: bool,
+        #[arg(long)]
+        fingerprint: Option<String>,
+    },
     /// Launch local web UI
     Ui { #[arg(long, default_value_t = 8080)] port: u16 },
 }
@@ -94,8 +103,9 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Watch { folder } => {
-            println!("Watch mode not implemented yet. Folder: {}", folder.display());
+        Commands::Watch { folder, addr, accept_first, fingerprint } => {
+            println!("Watching {} -> {}", folder.display(), addr);
+            watch::watch_and_sync(folder, addr, accept_first, fingerprint).await?;
         }
         Commands::Ui { port } => {
             println!("Starting LeafSync web UI on http://127.0.0.1:{port}");
