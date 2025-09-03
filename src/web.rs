@@ -1,7 +1,8 @@
-use axum::{routing::{get, post}, Router, extract::State, Json};
+use axum::{routing::{get, post}, Router, extract::{State, Query}, Json};
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use chrono::Utc;
+use directories::UserDirs;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -25,6 +26,18 @@ struct WatchReq { folder: String, addr: String, accept_first: bool, fingerprint:
 #[derive(Deserialize)]
 struct StopReq {}
 
+#[derive(Serialize)]
+struct DirEntry { name: String, path: String, has_children: bool }
+
+#[derive(Serialize)]
+struct FsListResp { path: String, dirs: Vec<DirEntry> }
+
+#[derive(Deserialize)]
+struct PathQuery { path: String }
+
+#[derive(Serialize)]
+struct QuickDir { name: String, path: String }
+
 pub async fn run_ui(port: u16) -> anyhow::Result<()> {
   let status = Arc::new(tokio::sync::Mutex::new(SyncStatus::default()));
   crate::status::init(status.clone());
@@ -39,6 +52,9 @@ pub async fn run_ui(port: u16) -> anyhow::Result<()> {
     .route("/api/watch/start", post(api_watch_start))
     .route("/api/watch/stop", post(api_watch_stop))
     .route("/api/status", get(api_status))
+  .route("/api/fs/roots", get(api_fs_roots))
+  .route("/api/fs/list", get(api_fs_list))
+  .route("/api/fs/quick", get(api_fs_quick))
         .with_state(Arc::new(state));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -108,12 +124,65 @@ async fn index() -> axum::response::Html<&'static str> {
     footer{margin-top:20px;color:var(--muted);font-size:.85rem}
     .toast{position:fixed;right:20px;bottom:20px;background:#0b1226;border:1px solid var(--border);color:var(--fg);padding:10px 14px;border-radius:10px;opacity:0;transform:translateY(10px);transition:.25s;box-shadow:var(--shadow)}
     .toast.show{opacity:1;transform:translateY(0)}
+
+    /* File picker modal */
+    .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:50}
+    .modal{width:min(720px,90vw);background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);padding:16px}
+    .pathbar{display:flex;gap:8px;align-items:center;margin-bottom:10px}
+    .pathbar input{flex:1}
+    .filelist{border:1px solid var(--border);border-radius:10px;max-height:360px;overflow:auto;background:#0b1226}
+    .filelist .row{display:flex;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.05)}
+    .filelist .row:last-child{border-bottom:none}
+    .picker-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:12px}
+  .quick{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px 0}
+  .chip{background:#0b1226;border:1px solid var(--border);padding:6px 10px;border-radius:999px;cursor:pointer;font-size:.9rem}
+    .controls-folder-port{display:grid;grid-template-columns:1fr 140px auto;gap:var(--gap)}
+    .controls-addr-folder{display:grid;grid-template-columns:1fr 1fr auto;gap:var(--gap)}
   </style>
   <script>
     function $(id){return document.getElementById(id)}
     let lastBytes=0,lastTs=0;
     function fmtBytes(b){const u=['B','KB','MB','GB','TB'];let i=0,x=b;while(x>=1024&&i<u.length-1){x/=1024;i++;}return `${x.toFixed(i?1:0)} ${u[i]}`}
     function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200)}
+    let pickerTarget=null; let currentPath='';
+    async function showPicker(targetId){ pickerTarget=targetId; $('picker').style.display='flex'; await loadRoots(); }
+    function hidePicker(){ $('picker').style.display='none'; }
+    async function loadRoots(){
+      try{ const r=await fetch('/api/fs/roots'); const roots=await r.json();
+        if(!roots || !roots.length){ toast('No roots found'); return; }
+        currentPath = roots[0]; $('picker-path').value=currentPath; await listDir(currentPath);
+      }catch(e){ console.error(e); toast('Failed to load system roots'); }
+      // Load quick-access folders
+      try{ const r=await fetch('/api/fs/quick'); const q=await r.json(); const el=$('picker-quick'); if(el){ el.innerHTML='';
+        for(const it of q){ const b=document.createElement('div'); b.className='chip'; b.textContent=it.name; b.title=it.path; b.onclick=()=>listDir(it.path); el.appendChild(b); }
+      }}catch(e){ /* ignore */ }
+    }
+    async function listDir(path){ try{
+        const r=await fetch('/api/fs/list?'+new URLSearchParams({path})); const j=await r.json(); currentPath=j.path; $('picker-path').value=currentPath;
+        const el=$('picker-list'); el.innerHTML='';
+        const upPath = parentPath(currentPath);
+        const upBtn=$('picker-up'); if(upBtn) upBtn.disabled = !upPath;
+        if(upPath){
+          const upRow = document.createElement('div'); upRow.className='row';
+          upRow.innerHTML = `<div>..</div><div></div>`; upRow.style.cursor='pointer';
+          upRow.onclick=()=> listDir(upPath);
+          el.appendChild(upRow);
+        }
+        for(const d of j.dirs){ const row=document.createElement('div'); row.className='row'; row.style.cursor='pointer'; row.onclick=()=>listDir(d.path); row.innerHTML=`<div>${d.name}</div><div>${d.has_children?'›':''}</div>`; el.appendChild(row); }
+      }catch(e){ toast('Cannot list directory') }
+    }
+    function parentPath(p){
+      if(!p) return '';
+      // strip trailing separators
+      const pp = p.replace(/[\\\/]+$/,'');
+      // Windows drive root like C:\ or C:
+      if(/^[A-Za-z]:$/.test(pp)) return '';
+      if(/^[A-Za-z]:$/.test(pp.replace(/\\+$/,''))) return '';
+      const i = Math.max(pp.lastIndexOf('\\'), pp.lastIndexOf('/'));
+      if(i<=0) return '';
+      return pp.slice(0,i);
+    }
+    function chooseCurrent(){ if(!pickerTarget||!currentPath){toast('No folder selected');return} $(pickerTarget).value=currentPath; hidePicker(); }
     async function serve(){
       const folder = $('serve-folder').value.trim();
       const port = parseInt($('serve-port').value||'4455');
@@ -175,9 +244,10 @@ async fn index() -> axum::response::Html<&'static str> {
     <div class="grid">
       <div class="card stack">
         <h3>Serve a folder</h3>
-        <div class="controls">
+        <div class="controls-folder-port">
           <input id="serve-folder" type="text" placeholder="Folder path (e.g. C:\\path\\to\\serve)" />
           <input id="serve-port" type="number" value="4455" min="1" max="65535" />
+          <button class="btn btn-outline" onclick="showPicker('serve-folder')">Browse…</button>
         </div>
         <div class="row">
           <button id="serve-btn" class="btn btn-primary" onclick="serve()">Start Server</button>
@@ -187,9 +257,10 @@ async fn index() -> axum::response::Html<&'static str> {
 
       <div class="card stack">
         <h3>Connect to a peer</h3>
-        <div class="controls">
+        <div class="controls-addr-folder">
           <input id="connect-addr" type="text" placeholder="IP:port (e.g. 127.0.0.1:4455)" />
           <input id="connect-folder" type="text" placeholder="Local folder (destination)" />
+          <button class="btn btn-outline" onclick="showPicker('connect-folder')">Browse…</button>
         </div>
         <div class="controls-3">
           <label><input type="checkbox" id="accept-first"/> Accept first</label>
@@ -201,9 +272,10 @@ async fn index() -> axum::response::Html<&'static str> {
 
       <div class="card stack">
         <h3>Watch mode</h3>
-        <div class="controls">
+        <div class="controls-addr-folder">
           <input id="watch-folder" type="text" placeholder="Folder to watch (source)" />
           <input id="watch-addr" type="text" placeholder="Peer IP:port" />
+          <button class="btn btn-outline" onclick="showPicker('watch-folder')">Browse…</button>
         </div>
         <div class="controls-3">
           <label><input type="checkbox" id="watch-accept-first"/> Accept first</label>
@@ -230,6 +302,21 @@ async fn index() -> axum::response::Html<&'static str> {
     <footer>Tip: First connection can use “Accept first”; later runs will use the pinned fingerprint.</footer>
   </div>
   <div id="toast" class="toast"></div>
+  <!-- Folder picker modal -->
+  <div id="picker" class="modal-backdrop" onclick="if(event.target.id==='picker')hidePicker()">
+    <div class="modal">
+      <div class="pathbar">
+        <input id="picker-path" type="text" readonly />
+  <button id="picker-up" class="btn btn-outline" onclick="const p=parentPath(currentPath); if(p) listDir(p)" title="Up one level">Up</button>
+      </div>
+  <div id="picker-quick" class="quick"></div>
+  <div id="picker-list" class="filelist"></div>
+      <div class="picker-actions">
+        <button class="btn btn-outline" onclick="hidePicker()">Cancel</button>
+        <button class="btn btn-primary" onclick="chooseCurrent()">Select Folder</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>"#)
 }
@@ -287,4 +374,101 @@ async fn api_watch_stop(State(state): State<Arc<AppState>>) -> Json<Resp> {
 
 async fn api_status(State(state): State<Arc<AppState>>) -> Json<SyncStatus> {
   Json(state.status.lock().await.clone())
+}
+
+async fn api_fs_roots() -> Json<Vec<String>> {
+  #[cfg(windows)]
+  {
+    let mut roots = Vec::new();
+    for letter in 'A'..='Z' {
+      let p = format!("{}:\\", letter);
+      if std::path::Path::new(&p).exists() {
+        roots.push(p);
+      }
+    }
+    return Json(roots);
+  }
+  #[cfg(not(windows))]
+  {
+    Json(vec!["/".to_string()])
+  }
+}
+
+async fn api_fs_list(Query(q): Query<PathQuery>) -> Json<FsListResp> {
+  let path = PathBuf::from(&q.path);
+  let mut dirs: Vec<DirEntry> = Vec::new();
+  if let Ok(rd) = std::fs::read_dir(&path) {
+    for e in rd {
+      if let Ok(entry) = e {
+        if let Ok(ft) = entry.file_type() { if ft.is_dir() {
+          let p = entry.path();
+          // Fast child-dir probe (up to a handful)
+          let mut has_children = false;
+          if let Ok(mut it) = std::fs::read_dir(&p) {
+            for _ in 0..8 { // cap to 8 entries
+              if let Some(Ok(ch)) = it.next() {
+                if ch.file_type().map(|ft| ft.is_dir()).unwrap_or(false) { has_children = true; break; }
+              } else { break; }
+            }
+          }
+          let name = entry.file_name().to_string_lossy().to_string();
+          let path_str = p.to_string_lossy().to_string();
+          dirs.push(DirEntry{ name, path: path_str, has_children });
+        }}
+      }
+    }
+  }
+  dirs.sort_by(|a,b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+  Json(FsListResp{ path: path.to_string_lossy().to_string(), dirs })
+}
+
+async fn api_fs_quick() -> Json<Vec<QuickDir>> {
+  let mut v: Vec<QuickDir> = Vec::new();
+  if let Some(ud) = UserDirs::new() {
+    let push = |v: &mut Vec<QuickDir>, name: &str, p: Option<&std::path::Path>| {
+      if let Some(p) = p { v.push(QuickDir{ name: name.to_string(), path: p.to_string_lossy().to_string() }); }
+    };
+    push(&mut v, "Desktop", ud.desktop_dir());
+    // directories crate doesn't expose Downloads directly on all platforms; try common locations
+    #[cfg(windows)]
+    {
+      // Try %USERPROFILE%/Downloads
+      if let Some(home) = ud.home_dir().to_str() { let dl=std::path::Path::new(home).join("Downloads"); if dl.exists() { v.push(QuickDir{ name:"Downloads".into(), path: dl.to_string_lossy().to_string() }); } }
+    }
+    #[cfg(not(windows))]
+    {
+      if let Some(home) = ud.home_dir().to_str() { let dl = std::path::Path::new(home).join("Downloads"); if dl.exists() { v.push(QuickDir{ name:"Downloads".into(), path: dl.to_string_lossy().to_string() }); } }
+    }
+    push(&mut v, "Documents", ud.document_dir());
+    push(&mut v, "Pictures", ud.picture_dir());
+    push(&mut v, "Music", ud.audio_dir());
+    push(&mut v, "Videos", ud.video_dir());
+    push(&mut v, "Home", Some(ud.home_dir()));
+  }
+  // Augment with Windows Known Folders if available
+  #[cfg(windows)]
+  {
+    use windows::Win32::UI::Shell::{FOLDERID_Downloads, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Pictures, FOLDERID_Music, FOLDERID_Videos, SHGetKnownFolderPath, KNOWN_FOLDER_FLAG};
+    use windows::Win32::Foundation::HANDLE;
+  use windows::core::GUID;
+    unsafe fn known_folder(id: &GUID) -> Option<String> {
+      match SHGetKnownFolderPath(id as *const _, KNOWN_FOLDER_FLAG(0), HANDLE(0)) {
+        Ok(p) => {
+          let mut len = 0usize; while *p.0.add(len) != 0 { len+=1; }
+          let s = String::from_utf16_lossy(std::slice::from_raw_parts(p.0, len));
+          windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *mut _));
+          Some(s)
+        }
+        Err(_) => None,
+      }
+    }
+    let mut add = |name: &str, id: &GUID| { if let Some(p)=unsafe{known_folder(id)} { v.push(QuickDir{name:name.into(), path:p}); } };
+    add("Desktop", &FOLDERID_Desktop);
+    add("Downloads", &FOLDERID_Downloads);
+    add("Documents", &FOLDERID_Documents);
+    add("Pictures", &FOLDERID_Pictures);
+    add("Music", &FOLDERID_Music);
+    add("Videos", &FOLDERID_Videos);
+  }
+  Json(v)
 }
