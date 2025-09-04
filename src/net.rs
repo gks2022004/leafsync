@@ -10,7 +10,17 @@ use crate::identity;
 use crate::trust;
 use crate::resume;
 
+fn normalize_rel(p: &str) -> String {
+    let s = p.replace('\\', "/");
+    let s = s.trim_start_matches('/');
+    s.to_string()
+}
+
 pub async fn run_server(folder: PathBuf, port: u16) -> Result<()> {
+    run_server_filtered(folder, port, None).await
+}
+
+pub async fn run_server_filtered(folder: PathBuf, port: u16, only_file: Option<String>) -> Result<()> {
     let (server_config, cert_der) = identity::make_server_config()?;
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
     let endpoint = Endpoint::server(server_config, addr)?;
@@ -20,8 +30,9 @@ pub async fn run_server(folder: PathBuf, port: u16) -> Result<()> {
 
     while let Some(connecting) = endpoint.accept().await {
         let folder = folder.clone();
+        let only_file = only_file.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection_server(folder, connecting).await {
+            if let Err(e) = handle_connection_server(folder, only_file, connecting).await {
                 eprintln!("connection error: {e:?}");
             }
         });
@@ -29,7 +40,7 @@ pub async fn run_server(folder: PathBuf, port: u16) -> Result<()> {
     Ok(())
 }
 
-async fn handle_connection_server(folder: PathBuf, conn: quinn::Connecting) -> Result<()> {
+async fn handle_connection_server(folder: PathBuf, only_file: Option<String>, conn: quinn::Connecting) -> Result<()> {
     let connection = conn.await?;
     println!("Peer connected: {}", connection.remote_address());
     let (mut send, mut recv) = connection.accept_bi().await?;
@@ -47,14 +58,20 @@ async fn handle_connection_server(folder: PathBuf, conn: quinn::Connecting) -> R
             println!("Received Hello");
             // send summary
             let summaries = syncer::all_summaries(&folder)?;
-            let files: Vec<FileSummary> = summaries.iter().map(|(s, _)| s.clone()).collect();
+            let filter_norm: Option<String> = only_file.as_ref().map(|s| normalize_rel(s));
+            let files: Vec<FileSummary> = summaries
+                .iter()
+                .map(|(s, _)| s.clone())
+                .filter(|fs| match &filter_norm { Some(f) => normalize_rel(&fs.rel_path) == *f, None => true })
+                .collect();
             send_msg(&mut send, &Msg::Summary { files }).await?;
-
             // Then serve per-file requests and accept client-initiated pushes
             loop {
         match recv_msg(&mut recv).await? {
                     Some(Msg::RequestFile { rel_path }) => {
             println!("RequestFile: {}", rel_path);
+                        // honor filter: if requested file doesn't match, ignore
+                        if let Some(ref f) = filter_norm { if normalize_rel(&rel_path) != *f { let _ = send_msg(&mut send, &Msg::Done).await; continue; } }
                         let abs = folder.join(&rel_path);
                         let chunks = if abs.exists() { chunk_file(&abs)? } else { Vec::new() };
                         let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
@@ -63,6 +80,8 @@ async fn handle_connection_server(folder: PathBuf, conn: quinn::Connecting) -> R
                     }
                     Some(Msg::FileMeta { rel_path, size, chunk_count, root, chunk_hashes }) => {
                         println!("Incoming push offer for {} ({} chunks)", rel_path, chunk_count);
+                        // honor filter: if not the allowed file, immediately respond Done
+                        if let Some(ref f) = filter_norm { if normalize_rel(&rel_path) != *f { let _ = send_msg(&mut send, &Msg::Done).await; continue; } }
                         let abs = folder.join(&rel_path);
                         let local_chunks: Vec<ChunkInfo> = if abs.exists() { chunk_file(&abs)? } else { Vec::new() };
                         let need = crate::syncer::diff_needed_indices(&local_chunks, &chunk_hashes);
@@ -117,6 +136,10 @@ async fn handle_connection_server(folder: PathBuf, conn: quinn::Connecting) -> R
 }
 
 pub async fn run_client(addr: String, folder: PathBuf, accept_first: bool, fingerprint: Option<String>) -> Result<()> {
+    run_client_filtered(addr, folder, accept_first, fingerprint, None).await
+}
+
+pub async fn run_client_filtered(addr: String, folder: PathBuf, accept_first: bool, fingerprint: Option<String>, only_file: Option<String>) -> Result<()> {
     let server_addr: SocketAddr = addr.parse()?;
     // Determine expected fingerprint from CLI or trust store
     let expected = if let Some(fp) = fingerprint { Some(fp) } else { trust::get(&addr)? };
@@ -141,8 +164,12 @@ pub async fn run_client(addr: String, folder: PathBuf, accept_first: bool, finge
     let summary = match recv_msg(&mut recv).await? { Some(Msg::Summary { files }) => files, other => { println!("Expected Summary, got {:?}", other); vec![] } };
     println!("Server reported {} files", summary.len());
 
+    // Normalize filter for comparison
+    let filter_norm: Option<String> = only_file.map(|s| normalize_rel(&s));
+
     // for each remote file, compare and request missing
     for remote in summary {
+        if let Some(ref f) = filter_norm { if &normalize_rel(&remote.rel_path) != f { continue; } }
         println!("Syncing {} ({} chunks)", remote.rel_path, remote.chunk_count);
     crate::status::start_file(&remote.rel_path, remote.size).await;
     send_msg(&mut send, &Msg::RequestFile { rel_path: remote.rel_path.clone() }).await?;
@@ -215,6 +242,7 @@ pub async fn run_client(addr: String, folder: PathBuf, accept_first: bool, finge
     // Push phase: offer local files to server so it can request missing chunks
     let locals = syncer::all_summaries(&folder)?;
     for (sum, chunks) in locals {
+        if let Some(ref f) = filter_norm { if &normalize_rel(&sum.rel_path) != f { continue; } }
         // announce local file
         let chunk_hashes: Vec<[u8;32]> = chunks.iter().map(|c| c.hash).collect();
         send_msg(&mut send, &Msg::FileMeta { rel_path: sum.rel_path.clone(), size: sum.size, chunk_count: sum.chunk_count, root: sum.root, chunk_hashes }).await?;

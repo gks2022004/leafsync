@@ -13,16 +13,16 @@ pub struct AppState {
 type SyncStatus = crate::status::SyncStatus;
 
 #[derive(Deserialize)]
-struct ServeReq { folder: String, port: u16 }
+struct ServeReq { folder: String, port: u16, rel_file: Option<String> }
 
 #[derive(Deserialize)]
-struct ConnectReq { addr: String, folder: String, accept_first: bool, fingerprint: Option<String> }
+struct ConnectReq { addr: String, folder: String, accept_first: bool, fingerprint: Option<String>, rel_file: Option<String> }
 
 #[derive(Serialize)]
 struct Resp { ok: bool, msg: String }
 
 #[derive(Deserialize)]
-struct WatchReq { folder: String, addr: String, accept_first: bool, fingerprint: Option<String> }
+struct WatchReq { folder: String, addr: String, accept_first: bool, fingerprint: Option<String>, rel_file: Option<String> }
 
 #[derive(Deserialize)]
 struct StopReq {}
@@ -31,7 +31,10 @@ struct StopReq {}
 struct DirEntry { name: String, path: String, has_children: bool }
 
 #[derive(Serialize)]
-struct FsListResp { path: String, dirs: Vec<DirEntry> }
+struct FileEntry { name: String, path: String, size: u64 }
+
+#[derive(Serialize)]
+struct FsListResp { path: String, dirs: Vec<DirEntry>, files: Vec<FileEntry> }
 
 #[derive(Deserialize)]
 struct PathQuery { path: String }
@@ -133,9 +136,10 @@ async fn index() -> axum::response::Html<&'static str> {
     .modal{width:min(720px,90vw);background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);padding:16px}
     .pathbar{display:flex;gap:8px;align-items:center;margin-bottom:10px}
     .pathbar input{flex:1}
-    .filelist{border:1px solid var(--border);border-radius:10px;max-height:360px;overflow:auto;background:#0b1226}
-    .filelist .row{display:flex;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.05)}
+  .filelist{border:1px solid var(--border);border-radius:10px;max-height:360px;overflow:auto;background:#0b1226}
+  .filelist .row{display:flex;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.05)}
     .filelist .row:last-child{border-bottom:none}
+  .filelist .row.sel{background:rgba(99,102,241,.18)}
     .picker-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:12px}
   .quick{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px 0}
   .chip{background:#0b1226;border:1px solid var(--border);padding:6px 10px;border-radius:999px;cursor:pointer;font-size:.9rem}
@@ -147,8 +151,8 @@ async fn index() -> axum::response::Html<&'static str> {
     let lastBytes=0,lastTs=0;
     function fmtBytes(b){const u=['B','KB','MB','GB','TB'];let i=0,x=b;while(x>=1024&&i<u.length-1){x/=1024;i++;}return `${x.toFixed(i?1:0)} ${u[i]}`}
     function toast(msg){const t=$('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200)}
-    let pickerTarget=null; let currentPath='';
-    async function showPicker(targetId){ pickerTarget=targetId; $('picker').style.display='flex'; await loadRoots(); }
+  let pickerTarget=null; let fileTarget=null; let currentPath=''; let selectedFile='';
+  async function showPicker(targetId){ pickerTarget=targetId; fileTarget=(targetId==='connect-folder')?'connect-file': (targetId==='serve-folder')?'serve-file': (targetId==='watch-folder')?'watch-file': null; selectedFile=''; $('picker').style.display='flex'; await loadRoots(); updatePickerButtons(); }
     function hidePicker(){ $('picker').style.display='none'; }
     async function loadRoots(){
       try{ const r=await fetch('/api/fs/roots'); const roots=await r.json();
@@ -160,9 +164,12 @@ async fn index() -> axum::response::Html<&'static str> {
         for(const it of q){ const b=document.createElement('div'); b.className='chip'; b.textContent=it.name; b.title=it.path; b.onclick=()=>listDir(it.path); el.appendChild(b); }
       }}catch(e){ /* ignore */ }
     }
+    function updatePickerButtons(){ const btn=$('picker-select-file'); if(btn){ btn.style.display = fileTarget? 'inline-block':'none'; btn.disabled = !selectedFile; } }
+    function basename(p){ const i=Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/')); return i>=0? p.slice(i+1): p; }
+    function relPath(dir, file){ let d=dir.replace(/[\\\/]+$/,''); let f=file; if(f.toLowerCase().startsWith(d.toLowerCase()+"\\") || f.toLowerCase().startsWith(d.toLowerCase()+"/")){ let r=f.substring(d.length+1); return r.replaceAll('\\','/'); } return basename(f); }
     async function listDir(path){ try{
         const r=await fetch('/api/fs/list?'+new URLSearchParams({path})); const j=await r.json(); currentPath=j.path; $('picker-path').value=currentPath;
-        const el=$('picker-list'); el.innerHTML='';
+        const el=$('picker-list'); el.innerHTML=''; selectedFile=''; updatePickerButtons();
         const upPath = parentPath(currentPath);
         const upBtn=$('picker-up'); if(upBtn) upBtn.disabled = !upPath;
         if(upPath){
@@ -171,7 +178,12 @@ async fn index() -> axum::response::Html<&'static str> {
           upRow.onclick=()=> listDir(upPath);
           el.appendChild(upRow);
         }
-        for(const d of j.dirs){ const row=document.createElement('div'); row.className='row'; row.style.cursor='pointer'; row.onclick=()=>listDir(d.path); row.innerHTML=`<div>${d.name}</div><div>${d.has_children?'›':''}</div>`; el.appendChild(row); }
+        for(const d of j.dirs){ const row=document.createElement('div'); row.className='row'; row.style.cursor='pointer'; row.onclick=()=>listDir(d.path); row.innerHTML=`<div>📁 ${d.name}</div><div>${d.has_children?'›':''}</div>`; el.appendChild(row); }
+        if(j.files&&j.files.length){
+          for(const f of j.files){ const row=document.createElement('div'); row.className='row'; row.style.cursor='pointer'; row.onclick=()=>{ Array.from(el.children).forEach(c=>c.classList&&c.classList.remove('sel')); row.classList.add('sel'); selectedFile=f.path; updatePickerButtons(); };
+            const size = (f.size>=1024)? (f.size>=1048576? (f.size/1048576).toFixed(1)+' MB' : (f.size/1024).toFixed(1)+' KB') : f.size+' B';
+            row.innerHTML=`<div>📄 ${f.name}</div><div>${size}</div>`; el.appendChild(row); }
+        }
       }catch(e){ toast('Cannot list directory') }
     }
     function parentPath(p){
@@ -185,29 +197,33 @@ async fn index() -> axum::response::Html<&'static str> {
       if(i<=0) return '';
       return pp.slice(0,i);
     }
-    function chooseCurrent(){ if(!pickerTarget||!currentPath){toast('No folder selected');return} $(pickerTarget).value=currentPath; hidePicker(); }
+  function chooseCurrent(){ if(!pickerTarget||!currentPath){toast('No folder selected');return} $(pickerTarget).value=currentPath; hidePicker(); }
+  function chooseFile(){ if(!fileTarget){ return; } if(!selectedFile){ toast('Select a file'); return; } if(!pickerTarget||!currentPath){ toast('No folder selected'); return; } $(pickerTarget).value=currentPath; $(fileTarget).value = relPath(currentPath, selectedFile); hidePicker(); }
     async function serve(){
       const folder = $('serve-folder').value.trim();
       const port = parseInt($('serve-port').value||'4455');
+      const rel_file = ($('serve-file')?.value.trim()||'')||null;
       if(!folder){toast('Folder is required');return}
       $('serve-btn').disabled=true;
-      const r = await fetch('/api/serve',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({folder,port})});
+      const r = await fetch('/api/serve',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({folder,port,rel_file})});
       const j = await r.json(); $('serve-out').textContent=j.msg; $('serve-btn').disabled=false; toast('Server starting')
     }
     async function connectPeer(){
       const addr=$('connect-addr').value.trim(); const folder=$('connect-folder').value.trim();
       const accept_first=$('accept-first').checked; const fingerprint=$('fingerprint').value.trim()||null;
+      const rel_file=($('connect-file')?.value.trim()||'')||null;
       if(!addr||!folder){toast('Address and local folder are required');return}
       $('connect-btn').disabled=true;
-      const r=await fetch('/api/connect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({addr,folder,accept_first,fingerprint})});
+      const r=await fetch('/api/connect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({addr,folder,accept_first,fingerprint,rel_file})});
       const j=await r.json(); $('connect-out').textContent=j.msg; $('connect-btn').disabled=false; toast('Connect started')
     }
     async function startWatch(){
       const folder=$('watch-folder').value.trim(); const addr=$('watch-addr').value.trim();
       const accept_first=$('watch-accept-first').checked; const fingerprint=$('watch-fp').value.trim()||null;
+      const rel_file=($('watch-file')?.value.trim()||'')||null;
       if(!folder||!addr){toast('Watch folder and address are required');return}
       $('watch-start').disabled=true; $('watch-stop').disabled=true;
-      const r=await fetch('/api/watch/start',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({folder,addr,accept_first,fingerprint})});
+      const r=await fetch('/api/watch/start',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({folder,addr,accept_first,fingerprint,rel_file})});
       const j=await r.json(); $('watch-out').textContent=j.msg; $('watch-start').disabled=false; $('watch-stop').disabled=false; toast('Watch started')
     }
     async function stopWatch(){
@@ -252,6 +268,9 @@ async fn index() -> axum::response::Html<&'static str> {
           <input id="serve-port" type="number" value="4455" min="1" max="65535" />
           <button class="btn btn-outline" onclick="showPicker('serve-folder')">Browse…</button>
         </div>
+        <div class="controls">
+          <input id="serve-file" type="text" placeholder="Specific file to serve/sync (relative to folder, optional)" />
+        </div>
         <div class="row">
           <button id="serve-btn" class="btn btn-primary" onclick="serve()">Start Server</button>
           <div id="serve-out" class="hint"></div>
@@ -270,6 +289,9 @@ async fn index() -> axum::response::Html<&'static str> {
           <input id="fingerprint" type="text" placeholder="Fingerprint (hex, optional)" />
           <button id="connect-btn" class="btn btn-primary" onclick="connectPeer()">Connect</button>
         </div>
+        <div class="controls">
+          <input id="connect-file" type="text" placeholder="Specific file to sync (relative to folder, optional)" />
+        </div>
         <div id="connect-out" class="hint"></div>
       </div>
 
@@ -287,6 +309,9 @@ async fn index() -> axum::response::Html<&'static str> {
             <button id="watch-start" class="btn btn-primary" onclick="startWatch()">Start Watch</button>
             <button id="watch-stop" class="btn btn-outline" onclick="stopWatch()">Stop Watch</button>
           </div>
+        </div>
+        <div class="controls">
+          <input id="watch-file" type="text" placeholder="Specific file to sync (relative to folder, optional)" />
         </div>
         <div id="watch-out" class="hint"></div>
       </div>
@@ -316,6 +341,7 @@ async fn index() -> axum::response::Html<&'static str> {
   <div id="picker-list" class="filelist"></div>
       <div class="picker-actions">
         <button class="btn btn-outline" onclick="hidePicker()">Cancel</button>
+        <button id="picker-select-file" class="btn btn-outline" onclick="chooseFile()" style="display:none">Select File</button>
         <button class="btn btn-primary" onclick="chooseCurrent()">Select Folder</button>
       </div>
     </div>
@@ -327,7 +353,7 @@ async fn index() -> axum::response::Html<&'static str> {
 async fn api_serve(State(_state): State<Arc<AppState>>, Json(req): Json<ServeReq>) -> Json<Resp> {
     let folder = PathBuf::from(req.folder);
     tokio::spawn(async move {
-        if let Err(e) = crate::net::run_server(folder, req.port).await {
+  if let Err(e) = crate::net::run_server_filtered(folder, req.port, req.rel_file).await {
             eprintln!("server error: {e:?}");
         }
     });
@@ -337,7 +363,7 @@ async fn api_serve(State(_state): State<Arc<AppState>>, Json(req): Json<ServeReq
 async fn api_connect(State(_state): State<Arc<AppState>>, Json(req): Json<ConnectReq>) -> Json<Resp> {
     let folder = PathBuf::from(req.folder);
     tokio::spawn(async move {
-        if let Err(e) = crate::net::run_client(req.addr, folder, req.accept_first, req.fingerprint).await {
+  if let Err(e) = crate::net::run_client_filtered(req.addr, folder, req.accept_first, req.fingerprint, req.rel_file).await {
             eprintln!("client error: {e:?}");
         }
     });
@@ -349,7 +375,7 @@ async fn api_watch_start(State(state): State<Arc<AppState>>, Json(req): Json<Wat
   if guard.is_some() {
     return Json(Resp { ok: false, msg: "Watch already running".to_string() });
   }
-  match crate::watch::spawn_watch(PathBuf::from(req.folder), req.addr, req.accept_first, req.fingerprint) {
+  match crate::watch::spawn_watch_filtered(PathBuf::from(req.folder), req.addr, req.accept_first, req.fingerprint, req.rel_file) {
     Ok(handle) => { 
       *guard = Some(handle);
       let mut st = state.status.lock().await;
@@ -412,29 +438,39 @@ async fn api_fs_roots() -> Json<Vec<String>> {
 async fn api_fs_list(Query(q): Query<PathQuery>) -> Json<FsListResp> {
   let path = PathBuf::from(&q.path);
   let mut dirs: Vec<DirEntry> = Vec::new();
+  let mut files: Vec<FileEntry> = Vec::new();
   if let Ok(rd) = std::fs::read_dir(&path) {
     for e in rd {
       if let Ok(entry) = e {
-        if let Ok(ft) = entry.file_type() { if ft.is_dir() {
-          let p = entry.path();
-          // Fast child-dir probe (up to a handful)
-          let mut has_children = false;
-          if let Ok(mut it) = std::fs::read_dir(&p) {
-            for _ in 0..8 { // cap to 8 entries
-              if let Some(Ok(ch)) = it.next() {
-                if ch.file_type().map(|ft| ft.is_dir()).unwrap_or(false) { has_children = true; break; }
-              } else { break; }
+        if let Ok(ft) = entry.file_type() {
+          if ft.is_dir() {
+            let p = entry.path();
+            // Fast child-dir probe (up to a handful)
+            let mut has_children = false;
+            if let Ok(mut it) = std::fs::read_dir(&p) {
+              for _ in 0..8 { // cap to 8 entries
+                if let Some(Ok(ch)) = it.next() {
+                  if ch.file_type().map(|ft| ft.is_dir()).unwrap_or(false) { has_children = true; break; }
+                } else { break; }
+              }
             }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path_str = p.to_string_lossy().to_string();
+            dirs.push(DirEntry{ name, path: path_str, has_children });
+          } else if ft.is_file() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let p = entry.path();
+            let path_str = p.to_string_lossy().to_string();
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            files.push(FileEntry{ name, path: path_str, size });
           }
-          let name = entry.file_name().to_string_lossy().to_string();
-          let path_str = p.to_string_lossy().to_string();
-          dirs.push(DirEntry{ name, path: path_str, has_children });
-        }}
+        }
       }
     }
   }
   dirs.sort_by(|a,b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-  Json(FsListResp{ path: path.to_string_lossy().to_string(), dirs })
+  files.sort_by(|a,b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+  Json(FsListResp{ path: path.to_string_lossy().to_string(), dirs, files })
 }
 
 async fn api_fs_quick() -> Json<Vec<QuickDir>> {
