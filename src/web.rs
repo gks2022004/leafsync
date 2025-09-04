@@ -1,4 +1,5 @@
 use axum::{routing::{get, post}, Router, extract::{State, Query}, Json};
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use chrono::Utc;
@@ -45,7 +46,7 @@ pub async fn run_ui(port: u16) -> anyhow::Result<()> {
     watch: Arc::new(tokio::sync::Mutex::new(None)),
     status,
   };
-    let app = Router::new()
+  let app = Router::new()
         .route("/", get(index))
         .route("/api/serve", post(api_serve))
         .route("/api/connect", post(api_connect))
@@ -55,6 +56,7 @@ pub async fn run_ui(port: u16) -> anyhow::Result<()> {
   .route("/api/fs/roots", get(api_fs_roots))
   .route("/api/fs/list", get(api_fs_list))
   .route("/api/fs/quick", get(api_fs_quick))
+  .route("/assets/leafsync.png", get(asset_logo))
         .with_state(Arc::new(state));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -96,7 +98,8 @@ async fn index() -> axum::response::Html<&'static str> {
   .container{max-width:1000px;margin:0 auto;padding:28px}
     header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
     .brand{display:flex;gap:12px;align-items:center}
-    .logo{width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,#22c55e,#4f46e5);box-shadow:var(--shadow)}
+  .logo{width:32px;height:32px;border-radius:8px;overflow:hidden;box-shadow:var(--shadow);background:#0b1226;display:flex;align-items:center;justify-content:center}
+  .logo img{width:32px;height:32px;display:block}
     .title{font-weight:700;letter-spacing:.2px}
     .subtitle{color:var(--muted);font-size:.9rem}
     .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
@@ -233,7 +236,7 @@ async fn index() -> axum::response::Html<&'static str> {
   <div class="container">
     <header>
       <div class="brand">
-        <div class="logo"></div>
+  <div class="logo"><img src="/assets/leafsync.png" alt="LeafSync"/></div>
         <div>
           <div class="title">LeafSync</div>
           <div class="subtitle">P2P QUIC file sync with Merkle delta</div>
@@ -374,6 +377,18 @@ async fn api_watch_stop(State(state): State<Arc<AppState>>) -> Json<Resp> {
 
 async fn api_status(State(state): State<Arc<AppState>>) -> Json<SyncStatus> {
   Json(state.status.lock().await.clone())
+}
+
+async fn asset_logo() -> Result<axum::response::Response, (StatusCode, String)> {
+  let p = std::path::Path::new("assets/leafsync.png");
+  match tokio::fs::read(p).await {
+    Ok(bytes) => {
+      let mut resp = axum::response::Response::new(bytes.into());
+      resp.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("image/png"));
+      Ok(resp)
+    }
+    Err(e) => Err((StatusCode::NOT_FOUND, format!("asset not found: {}", e)))
+  }
 }
 
 async fn api_fs_roots() -> Json<Vec<String>> {
