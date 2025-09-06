@@ -1,11 +1,11 @@
 use anyhow::Result;
-use quinn::{Endpoint, RecvStream, SendStream};
+use quinn::{Endpoint, RecvStream, SendStream, TransportConfig};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use rustls::client::{ServerCertVerifier, ServerCertVerified};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::io::AsyncWriteExt;
 
-use crate::{protocol::{Msg, FileSummary}, syncer, chunk::{chunk_file, read_chunk, ChunkInfo}};
+use crate::{protocol::{Msg, FileSummary}, syncer, chunk::{chunk_file, read_chunk, ChunkInfo, CHUNK_SIZE, rel_paths_in_dir}};
 use crate::identity;
 use crate::trust;
 use crate::resume;
@@ -16,13 +16,19 @@ fn normalize_rel(p: &str) -> String {
     s.to_string()
 }
 
+fn is_internal_rel(rel: &str) -> bool {
+    let r = rel.replace('\\', "/");
+    r.starts_with(".leafsync_tmp/") || r.starts_with(".leafsync_trash/") || r.starts_with(".git/") || r.ends_with(".part")
+}
+
 #[allow(dead_code)]
 pub async fn run_server(folder: PathBuf, port: u16) -> Result<()> {
     run_server_filtered(folder, port, None).await
 }
 
 pub async fn run_server_filtered(folder: PathBuf, port: u16, only_file: Option<String>) -> Result<()> {
-    let (server_config, cert_der) = identity::make_server_config()?;
+    let (mut server_config, cert_der) = identity::make_server_config()?;
+    server_config.transport = tuned_transport();
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
     let endpoint = Endpoint::server(server_config, addr)?;
     println!("Server cert SHA-256 fingerprint: {}", sha256_hex(&cert_der));
@@ -73,13 +79,34 @@ async fn handle_server_stream(folder: PathBuf, only_file: Option<String>, send: 
                 send_msg(send, &Msg::Version { major: 1, minor: 0 }).await?;
                 // expect Hello
                 if let Some(Msg::Hello { folder: _ }) = recv_msg(recv).await? {
-                    let summaries = syncer::all_summaries(&folder)?;
                     let filter_norm: Option<String> = only_file.as_ref().map(|s| normalize_rel(s));
-                    let files: Vec<FileSummary> = summaries
-                        .iter()
-                        .map(|(s, _)| s.clone())
-                        .filter(|fs| match &filter_norm { Some(f) => normalize_rel(&fs.rel_path) == *f, None => true })
-                        .collect();
+                    let mut files: Vec<FileSummary> = Vec::new();
+                    if let Some(ref f) = filter_norm {
+                        // Fast path: single file metadata
+                        let p = folder.join(f);
+                        if let Ok(meta) = std::fs::metadata(&p) {
+                            if meta.is_file() {
+                                let size = meta.len();
+                                let cc = if size == 0 { 0 } else { ((size - 1) / CHUNK_SIZE as u64) + 1 };
+                                files.push(FileSummary { rel_path: f.clone(), size, chunk_count: cc, root: [0u8;32] });
+                            }
+                        }
+                    } else {
+                        // Walk directory without hashing
+                        for rel in rel_paths_in_dir(&folder)? {
+                            let p = folder.join(&rel);
+                            if let Ok(meta) = std::fs::metadata(&p) {
+                                if meta.is_file() {
+                                    let rel_s = rel.to_string_lossy().to_string();
+                                    if is_internal_rel(&rel_s) { continue; }
+                                    let size = meta.len();
+                                    let cc = if size == 0 { 0 } else { ((size - 1) / CHUNK_SIZE as u64) + 1 };
+                                    files.push(FileSummary { rel_path: rel_s, size, chunk_count: cc, root: [0u8;32] });
+                                }
+                            }
+                        }
+                    }
+                    println!("Server summary: {} files (filter={:?})", files.len(), filter_norm);
                     send_msg(send, &Msg::Summary { files }).await?;
                     // control loop for this stream
                     loop {
@@ -93,12 +120,15 @@ async fn handle_server_stream(folder: PathBuf, only_file: Option<String>, send: 
                                 let chunk_hashes: Vec<[u8; 32]> = chunks.iter().map(|c| c.hash).collect();
                                 send_msg(send, &Msg::FileMeta { rel_path: rel_path.clone(), size, chunk_count: chunks.len() as u64, root: merkle_root_from_chunks(&chunks), chunk_hashes }).await?;
                             }
-                            Some(Msg::FileMeta { rel_path, size, chunk_count, root, chunk_hashes }) => {
+                            Some(Msg::FileMeta { rel_path, size, chunk_count: _chunk_count, root, chunk_hashes }) => {
                                 let filter_norm: Option<String> = only_file.as_ref().map(|s| normalize_rel(s));
+                                if is_internal_rel(&rel_path) { let _ = send_msg(send, &Msg::Done).await; continue; }
                                 if let Some(ref f) = filter_norm { if normalize_rel(&rel_path) != *f { let _ = send_msg(send, &Msg::Done).await; continue; } }
                                 let abs = folder.join(&rel_path);
                                 let local_chunks: Vec<ChunkInfo> = if abs.exists() { chunk_file(&abs)? } else { Vec::new() };
                                 let need = crate::syncer::diff_needed_indices(&local_chunks, &chunk_hashes);
+                                // Seed staging with existing destination before applying deltas
+                                let _ = crate::syncer::seed_staging_from_dest(&folder, &rel_path);
                                 send_msg(send, &Msg::RequestChunks { rel_path: rel_path.clone(), indices: need.clone() }).await?;
                                 // Receive the chunk data then Done
                                 loop {
@@ -149,6 +179,7 @@ async fn handle_server_stream(folder: PathBuf, only_file: Option<String>, send: 
             // For completeness, allow RequestFile/FileMeta without Version on a dedicated stream
             Msg::RequestFile { rel_path } => {
                 let filter_norm: Option<String> = only_file.as_ref().map(|s| normalize_rel(s));
+                if is_internal_rel(&rel_path) { let _ = send_msg(send, &Msg::Done).await; return Ok(()); }
                 if let Some(ref f) = filter_norm { if normalize_rel(&rel_path) != *f { let _ = send_msg(send, &Msg::Done).await; return Ok(()); } }
                 let abs = folder.join(&rel_path);
                 let chunks = if abs.exists() { chunk_file(&abs)? } else { Vec::new() };
@@ -199,10 +230,7 @@ pub async fn run_client_filtered(addr: String, folder: PathBuf, accept_first: bo
     let filter_norm: Option<String> = only_file.map(|s| normalize_rel(&s));
     
     // Helper: skip internal/ignored patterns for deletion
-    fn is_ignored_rel(rel: &str) -> bool {
-        let r = rel.replace('\\', "/");
-        r.starts_with(".leafsync_tmp/") || r.contains("/.git/") || r.ends_with(".part") || r.contains("/~$")
-    }
+    fn is_ignored_rel(rel: &str) -> bool { is_internal_rel(rel) }
     
     // Optional mirror: remove local files missing on server (move to trash)
     if mirror {
@@ -210,10 +238,9 @@ pub async fn run_client_filtered(addr: String, folder: PathBuf, accept_first: bo
         let remote_set: HashSet<String> = summary.iter()
             .map(|f| normalize_rel(&f.rel_path))
             .collect();
-        let locals = crate::syncer::all_summaries(&folder)?;
-        let local_set: HashSet<String> = locals.iter()
-            .map(|(s, _)| normalize_rel(&s.rel_path))
-            .collect();
+        // Lightweight local listing
+        let mut local_set: HashSet<String> = HashSet::new();
+        for rel in rel_paths_in_dir(&folder)? { local_set.insert(normalize_rel(&rel.to_string_lossy())); }
         for rel in local_set.difference(&remote_set) {
             if let Some(ref f) = filter_norm { if rel != f { continue; } }
             if is_ignored_rel(rel) { continue; }
@@ -317,6 +344,7 @@ pub async fn run_client_filtered(addr: String, folder: PathBuf, accept_first: bo
     // Push phase: offer local files to server so it can request missing chunks
     let locals = syncer::all_summaries(&folder)?;
     for (sum, chunks) in locals {
+        if is_internal_rel(&sum.rel_path) { continue; }
         if let Some(ref f) = filter_norm { if &normalize_rel(&sum.rel_path) != f { continue; } }
         // announce local file
         let chunk_hashes: Vec<[u8;32]> = chunks.iter().map(|c| c.hash).collect();
@@ -390,7 +418,9 @@ fn make_client_config_pinned(addr: String, expected: Option<String>, accept_firs
         .with_no_client_auth();
     crypto.dangerous().set_certificate_verifier(Arc::new(PinVerifier { addr, expected, accept_first }));
     let crypto = Arc::new(crypto);
-    Ok(quinn::ClientConfig::new(crypto))
+    let mut cfg = quinn::ClientConfig::new(crypto);
+    cfg.transport_config(tuned_transport());
+    Ok(cfg)
 }
 
 struct PinVerifier {
@@ -438,6 +468,18 @@ fn sha256_hex(bytes: &[u8]) -> String {
     h.update(bytes);
     let out = h.finalize();
     out.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn tuned_transport() -> Arc<TransportConfig> {
+    use std::time::Duration;
+    let mut t = TransportConfig::default();
+    // Keep connections alive and increase idle timeout to reduce spuriously closed sessions
+    t.keep_alive_interval(Some(Duration::from_secs(5)));
+    t.max_idle_timeout(Some(quinn::IdleTimeout::from(quinn::VarInt::from_u32(120_000))));
+    // Slightly higher flow control windows for chunk traffic
+    t.receive_window(quinn::VarInt::from_u32(2 * 1024 * 1024));
+    t.send_window(u64::from(quinn::VarInt::from_u32(2 * 1024 * 1024)));
+    Arc::new(t)
 }
 
 struct RateLimiter {

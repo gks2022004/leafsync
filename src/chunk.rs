@@ -70,13 +70,30 @@ pub fn write_chunk(path: &Path, index: u64, data: &[u8]) -> Result<()> {
 }
 
 pub fn rel_paths_in_dir(dir: &Path) -> Result<Vec<PathBuf>> {
-    use walkdir::WalkDir;
+    use walkdir::{DirEntry, WalkDir};
+
+    fn is_ignored_dir(e: &DirEntry) -> bool {
+        if !e.file_type().is_dir() { return false; }
+        let name = e.file_name().to_string_lossy();
+        matches!(name.as_ref(), ".leafsync_tmp" | ".leafsync_trash" | ".git")
+    }
+
     let mut out = Vec::new();
-    for e in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+    for e in WalkDir::new(dir)
+        .into_iter()
+        .filter_entry(|e| !is_ignored_dir(e))
+        .filter_map(|e| e.ok())
+    {
         if e.file_type().is_file() {
             let p = e.path().to_path_buf();
-            let rp = p.strip_prefix(dir).unwrap().to_path_buf();
-            out.push(rp);
+            if let Ok(rp) = p.strip_prefix(dir) {
+                let rel_str = rp.to_string_lossy().replace('\\', "/");
+                // Skip internal/temp artifacts
+                if rel_str.ends_with(".part") || rel_str.contains("/~$") {
+                    continue;
+                }
+                out.push(rp.to_path_buf());
+            }
         }
     }
     Ok(out)

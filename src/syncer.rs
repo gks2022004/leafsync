@@ -105,3 +105,24 @@ pub fn truncate_staging_to_size(root: &Path, rel_path: &str, size: u64) -> Resul
     f.set_len(size)?;
     Ok(())
 }
+
+/// Seed the staging file with the current destination file contents, if any.
+/// This avoids zero-filled gaps causing Merkle mismatches during server-side push.
+pub fn seed_staging_from_dest(root: &Path, rel_path: &str) -> Result<()> {
+    use std::io::{Read, Write};
+    let final_path = root.join(rel_path);
+    let stage = staging_path(root, rel_path);
+    if let Some(parent) = stage.parent() { std::fs::create_dir_all(parent)?; }
+    if !final_path.exists() {
+        // Ensure empty staging file exists
+        let _ = std::fs::OpenOptions::new().create(true).write(true).open(&stage)?;
+        return Ok(());
+    }
+    // Copy whole file into staging
+    let mut src = std::fs::File::open(&final_path)?;
+    let mut dst = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&stage)?;
+    let mut buf = Vec::new();
+    src.read_to_end(&mut buf)?;
+    dst.write_all(&buf)?;
+    Ok(())
+}
