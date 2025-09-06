@@ -1,8 +1,11 @@
 # <img src="https://github.com/user-attachments/assets/77c7b4b1-9dce-4dde-99f7-593ef111b5b5" alt="leafsync" width="72" height="72" align="middle" /> **LeafSync**
 
 Peer‑to‑peer file sync over QUIC with Merkle‑based delta transfers.
+Fast, safe, offline P2P sync with a clean Web UI and CLI.
+Transfers only changed chunks, resumes after interruptions, and verifies integrity before making changes visible.
 
-<img width="1272" height="863" alt="image" src="https://github.com/user-attachments/assets/67d903d2-4bd1-46c4-9a91-69090920d928" />
+<img width="2116" height="1947" alt="127 0 0 1_8080_ (2)" src="https://github.com/user-attachments/assets/9fc86dce-247e-4fd5-8710-88e3b13c12f7" />
+
 
 ## What’s inside
 - QUIC transport (quinn) + TLS (rustls), single UDP port
