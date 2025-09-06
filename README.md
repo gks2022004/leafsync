@@ -10,7 +10,7 @@ Peer‑to‑peer file sync over QUIC with Merkle‑based delta transfers.
 - Atomic staging + verification before finalize (no partial/corrupt files)
 - Resume partial transfers (chunk‑level bitmaps)
 - TOFU trust pinning (accept‑first or pinned fingerprint)
-- Watch mode with bidirectional behavior (pull periodically + push on local change)
+- Continuous sync: Connect runs repeated passes (near real-time)
 - Parallel chunk streams per file (configurable), optional global rate limiting
 - Excludes internal artifacts: .leafsync_tmp, .leafsync_trash, .git, and *.part
 - Web UI:
@@ -33,17 +33,14 @@ cargo run -- ui --port 8080
   - Enter peer IP:port and choose your local destination folder.
   - Optional: pick a specific file to sync (relative to the chosen folder).
   - First time: check “Accept first” to pin the server fingerprint automatically.
-- Watch mode
-  - Pick the local folder you work in and the peer IP:port.
-  - Optional: pick a specific file to sync continuously.
-  - Runs bidirectionally: periodic pulls plus push‑on‑change.
+- Connect runs continuously; leave it open for near real-time sync.
 
 Notes
 - The picker lets you browse directories and also select a file. When you click “Select File”, the folder field is set to the current directory and the file field is populated with a relative path.
 - On Windows, the picker shows quick links (Desktop, Downloads, Documents, Pictures, Music, Videos, Home).
 
 ## CLI usage
-The CLI supports single‑file sync and mirror deletes flags.
+The CLI supports single‑file sync and mirror deletes flags. Connect runs continuously.
 
 ```powershell
 # Start a server (listener)
@@ -52,8 +49,7 @@ cargo run -- serve .\shared --port 4455 [--file relative\\path\\to\\file]
 # Connect to a server and sync (first time: trust on first use)
 cargo run -- connect 127.0.0.1:4455 .\shared --accept-first [--fingerprint <hex>] [--file relative\\path\\to\\file] [--mirror] [--streams 8] [--rate-mbps 50]
 
-# Watch a folder and sync on changes (bidirectional: also pulls periodically)
-cargo run -- watch .\shared 127.0.0.1:4455 --accept-first [--fingerprint <hex>] [--file relative\\path\\to\\file] [--mirror] [--streams 8] [--rate-mbps 50]
+# Connect runs continuous sync passes until you stop it
 
 # Manage trusted fingerprints (TOFU store)
 cargo run -- trust list

@@ -210,21 +210,8 @@ pub async fn run_client_filtered(addr: String, folder: PathBuf, accept_first: bo
     endpoint.set_default_client_config(client_cfg);
 
     let connection = endpoint.connect(server_addr, "localhost")?.await?;
-    let (mut send, mut recv) = connection.open_bi().await?;
-    println!("Opened bi stream to server");
+    println!("Connected to server");
     crate::status::set_active(true).await;
-
-    // version negotiation: send first, then expect server's version
-    send_msg(&mut send, &Msg::Version { major: 1, minor: 0 }).await?;
-    match recv_msg(&mut recv).await? {
-        Some(Msg::Version { major, .. }) if major == 1 => {}
-        other => { println!("Expected Version from server, got {:?}", other); return Ok(()); }
-    }
-
-    // hello + get summary
-    send_msg(&mut send, &Msg::Hello { folder: folder.to_string_lossy().to_string() }).await?;
-    let summary = match recv_msg(&mut recv).await? { Some(Msg::Summary { files }) => files, other => { println!("Expected Summary, got {:?}", other); vec![] } };
-    println!("Server reported {} files", summary.len());
 
     // Normalize filter for comparison
     let filter_norm: Option<String> = only_file.map(|s| normalize_rel(&s));
@@ -232,31 +219,41 @@ pub async fn run_client_filtered(addr: String, folder: PathBuf, accept_first: bo
     // Helper: skip internal/ignored patterns for deletion
     fn is_ignored_rel(rel: &str) -> bool { is_internal_rel(rel) }
     
-    // Optional mirror: remove local files missing on server (move to trash)
-    if mirror {
-        use std::collections::HashSet;
-        let remote_set: HashSet<String> = summary.iter()
-            .map(|f| normalize_rel(&f.rel_path))
-            .collect();
-        // Lightweight local listing
-        let mut local_set: HashSet<String> = HashSet::new();
-        for rel in rel_paths_in_dir(&folder)? { local_set.insert(normalize_rel(&rel.to_string_lossy())); }
-        for rel in local_set.difference(&remote_set) {
-            if let Some(ref f) = filter_norm { if rel != f { continue; } }
-            if is_ignored_rel(rel) { continue; }
-            // move to .leafsync_trash with timestamped root
-            if let Err(e) = move_to_trash(&folder, rel) { eprintln!("mirror trash failed for {}: {:?}", rel, e); }
-            else { println!("Mirrored delete (moved to trash): {}", rel); }
+    loop {
+        // Open a fresh control stream for this sync pass
+        let (mut send, mut recv) = connection.open_bi().await?;
+        // version negotiation: send first, then expect server's version
+        send_msg(&mut send, &Msg::Version { major: 1, minor: 0 }).await?;
+        match recv_msg(&mut recv).await? {
+            Some(Msg::Version { major, .. }) if major == 1 => {}
+            other => { println!("Expected Version from server, got {:?}", other); break; }
         }
-    }
+        // hello + get summary
+        send_msg(&mut send, &Msg::Hello { folder: folder.to_string_lossy().to_string() }).await?;
+        let summary = match recv_msg(&mut recv).await? { Some(Msg::Summary { files }) => files, other => { println!("Expected Summary, got {:?}", other); vec![] } };
+        // Optional mirror: remove local files missing on server (move to trash)
+        if mirror {
+            use std::collections::HashSet;
+            let remote_set: HashSet<String> = summary.iter().map(|f| normalize_rel(&f.rel_path)).collect();
+            // Lightweight local listing
+            let mut local_set: HashSet<String> = HashSet::new();
+            for rel in rel_paths_in_dir(&folder)? { local_set.insert(normalize_rel(&rel.to_string_lossy())); }
+            for rel in local_set.difference(&remote_set) {
+                if let Some(ref f) = filter_norm { if rel != f { continue; } }
+                if is_ignored_rel(rel) { continue; }
+                if let Err(e) = move_to_trash(&folder, rel) { eprintln!("mirror trash failed for {}: {:?}", rel, e); }
+                else { println!("Mirrored delete (moved to trash): {}", rel); }
+            }
+        }
+        println!("Server reported {} files", summary.len());
 
-    // for each remote file, compare and request missing
-    for remote in summary {
+        // for each remote file, compare and request missing
+        for remote in summary {
         if let Some(ref f) = filter_norm { if &normalize_rel(&remote.rel_path) != f { continue; } }
         println!("Syncing {} ({} chunks)", remote.rel_path, remote.chunk_count);
     crate::status::start_file(&remote.rel_path, remote.size).await;
-    send_msg(&mut send, &Msg::RequestFile { rel_path: remote.rel_path.clone() }).await?;
-        let meta = match recv_msg(&mut recv).await? {
+        send_msg(&mut send, &Msg::RequestFile { rel_path: remote.rel_path.clone() }).await?;
+            let meta = match recv_msg(&mut recv).await? {
             Some(Msg::FileMeta { rel_path, size, chunk_count, root, chunk_hashes }) => (rel_path, size, chunk_count, root, chunk_hashes),
             _ => continue,
         };
@@ -338,39 +335,42 @@ pub async fn run_client_filtered(addr: String, folder: PathBuf, accept_first: bo
             println!("Warning: Merkle root mismatch for {}. Kept staged file; will not finalize.", meta.0);
             crate::status::file_done(false, "merkle_mismatch").await;
         }
-        println!("\nDone.");
-    }
-
-    // Push phase: offer local files to server so it can request missing chunks
-    let locals = syncer::all_summaries(&folder)?;
-    for (sum, chunks) in locals {
-        if is_internal_rel(&sum.rel_path) { continue; }
-        if let Some(ref f) = filter_norm { if &normalize_rel(&sum.rel_path) != f { continue; } }
-        // announce local file
-        let chunk_hashes: Vec<[u8;32]> = chunks.iter().map(|c| c.hash).collect();
-        send_msg(&mut send, &Msg::FileMeta { rel_path: sum.rel_path.clone(), size: sum.size, chunk_count: sum.chunk_count, root: sum.root, chunk_hashes }).await?;
-        // wait either for RequestChunks or Done/next
-        let mut to_send: Option<Vec<u64>> = None;
-        match recv_msg(&mut recv).await? {
-            Some(Msg::RequestChunks { rel_path, indices }) if rel_path == sum.rel_path => {
-                to_send = Some(indices);
-            }
-            Some(Msg::Done) | None => {}
-            _ => {}
+            println!("\nDone.");
         }
-        if let Some(indices) = to_send {
-            let abs = folder.join(&sum.rel_path);
-            for idx in indices {
-                let data = read_chunk(&abs, idx).unwrap_or_default();
-                send_msg(&mut send, &Msg::ChunkData { rel_path: sum.rel_path.clone(), index: idx, data }).await?;
-            }
-            send_msg(&mut send, &Msg::Done).await?;
-        }
-    }
 
-    // signal done
-    let _ = send_msg(&mut send, &Msg::Done).await;
-    crate::status::session_done(true, "client_done").await;
+        // Push phase: offer local files to server so it can request missing chunks
+        let locals = syncer::all_summaries(&folder)?;
+        for (sum, chunks) in locals {
+            if is_internal_rel(&sum.rel_path) { continue; }
+            if let Some(ref f) = filter_norm { if &normalize_rel(&sum.rel_path) != f { continue; } }
+            // announce local file
+            let chunk_hashes: Vec<[u8;32]> = chunks.iter().map(|c| c.hash).collect();
+            send_msg(&mut send, &Msg::FileMeta { rel_path: sum.rel_path.clone(), size: sum.size, chunk_count: sum.chunk_count, root: sum.root, chunk_hashes }).await?;
+            // wait either for RequestChunks or Done/next
+            let mut to_send: Option<Vec<u64>> = None;
+            match recv_msg(&mut recv).await? {
+                Some(Msg::RequestChunks { rel_path, indices }) if rel_path == sum.rel_path => {
+                    to_send = Some(indices);
+                }
+                Some(Msg::Done) | None => {}
+                _ => {}
+            }
+            if let Some(indices) = to_send {
+                let abs = folder.join(&sum.rel_path);
+                for idx in indices {
+                    let data = read_chunk(&abs, idx).unwrap_or_default();
+                    send_msg(&mut send, &Msg::ChunkData { rel_path: sum.rel_path.clone(), index: idx, data }).await?;
+                }
+                send_msg(&mut send, &Msg::Done).await?;
+            }
+        }
+
+        // signal done for this pass
+        let _ = send_msg(&mut send, &Msg::Done).await;
+        crate::status::session_done(true, "client_done").await;
+        // short delay before next pass for near-real-time behavior
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
     Ok(())
 }
 

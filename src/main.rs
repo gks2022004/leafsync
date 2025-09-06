@@ -8,7 +8,7 @@ mod trust;
 mod resume;
 mod web;
 mod status;
-mod watch;
+// mod watch; // removed watch mode; continuous sync handled by Connect
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -58,27 +58,6 @@ enum Commands {
     /// Manage trusted server fingerprints (TOFU)
     #[command(subcommand)]
     Trust(TrustCmd),
-    /// Watch a folder and sync on changes
-    Watch {
-        folder: PathBuf,
-        addr: String,
-        #[arg(long)]
-        accept_first: bool,
-        #[arg(long)]
-        fingerprint: Option<String>,
-    /// Sync only a specific file (relative to folder)
-    #[arg(long)]
-    file: Option<String>,
-    /// Mirror deletes (move local-only files into .leafsync_trash)
-    #[arg(long)]
-    mirror: bool,
-    /// Number of concurrent download streams (1-16)
-    #[arg(long, default_value_t = 4)]
-    streams: usize,
-    /// Rate limit in Mbps (omit for unlimited)
-    #[arg(long)]
-    rate_mbps: Option<f64>,
-    },
     /// Launch local web UI
     Ui { #[arg(long, default_value_t = 8080)] port: u16 },
 }
@@ -129,13 +108,6 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-        }
-        Commands::Watch { folder, addr, accept_first, fingerprint, file, mirror, streams, rate_mbps } => {
-            println!("Watching {} -> {}", folder.display(), addr);
-            // Use filtered spawn so it periodically pulls/pushes only the file
-            watch::spawn_watch_filtered(folder, addr, accept_first, fingerprint, file, mirror, streams, rate_mbps)?
-                .stop()
-                .await;
         }
         Commands::Ui { port } => {
             println!("Starting LeafSync web UI on http://127.0.0.1:{port}");
