@@ -18,6 +18,7 @@ pub fn hash_bytes(data: &[u8]) -> [u8; 32] {
     out.into()
 }
 
+#[allow(dead_code)]
 pub fn hash_file(path: &Path) -> Result<[u8; 32]> {
     let mut f = File::open(path).with_context(|| format!("open file {path:?}"))?;
     let mut hasher = Sha256::new();

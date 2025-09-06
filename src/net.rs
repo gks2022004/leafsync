@@ -16,6 +16,7 @@ fn normalize_rel(p: &str) -> String {
     s.to_string()
 }
 
+#[allow(dead_code)]
 pub async fn run_server(folder: PathBuf, port: u16) -> Result<()> {
     run_server_filtered(folder, port, None).await
 }
@@ -135,6 +136,7 @@ async fn handle_connection_server(folder: PathBuf, only_file: Option<String>, co
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn run_client(addr: String, folder: PathBuf, accept_first: bool, fingerprint: Option<String>) -> Result<()> {
     run_client_filtered(addr, folder, accept_first, fingerprint, None).await
 }

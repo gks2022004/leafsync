@@ -38,6 +38,7 @@ pub fn diff_needed_indices(local_chunks: &[ChunkInfo], remote_chunk_hashes: &[[u
     need
 }
 
+#[allow(dead_code)]
 pub fn apply_chunk(root: &Path, rel_path: &str, index: u64, data: &[u8]) -> Result<()> {
     let abs = root.join(rel_path);
     if let Some(parent) = abs.parent() { std::fs::create_dir_all(parent)?; }
@@ -46,6 +47,7 @@ pub fn apply_chunk(root: &Path, rel_path: &str, index: u64, data: &[u8]) -> Resu
 }
 
 /// Ensure the file is truncated to the expected number of chunks.
+#[allow(dead_code)]
 pub fn truncate_to_chunks(root: &Path, rel_path: &str, chunk_count: u64, last_chunk_size: Option<usize>) -> Result<()> {
     use std::io::{Seek, SeekFrom, Write};
     let abs = root.join(rel_path);
@@ -59,6 +61,7 @@ pub fn truncate_to_chunks(root: &Path, rel_path: &str, chunk_count: u64, last_ch
 }
 
 /// Truncate or extend the file to an exact byte size.
+#[allow(dead_code)]
 pub fn truncate_to_size(root: &Path, rel_path: &str, size: u64) -> Result<()> {
     let abs = root.join(rel_path);
     if !abs.exists() { return Ok(()); }
@@ -89,6 +92,7 @@ pub fn finalize_staging(root: &Path, rel_path: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn path_from_rel(root: &Path, rel: &str) -> PathBuf {
     root.join(rel)
 }

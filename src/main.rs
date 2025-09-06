@@ -28,6 +28,9 @@ enum Commands {
         folder: PathBuf,
         #[arg(long, default_value_t = 4455)]
         port: u16,
+        /// Sync only a specific file (relative to folder)
+        #[arg(long)]
+        file: Option<String>,
     },
     /// Connect to a peer and sync a folder
     Connect {
@@ -39,6 +42,9 @@ enum Commands {
     /// Provide a known fingerprint (hex) to pin on this connect
     #[arg(long)]
     fingerprint: Option<String>,
+    /// Sync only a specific file (relative to folder)
+    #[arg(long)]
+    file: Option<String>,
     },
     /// Manage trusted server fingerprints (TOFU)
     #[command(subcommand)]
@@ -51,6 +57,9 @@ enum Commands {
         accept_first: bool,
         #[arg(long)]
         fingerprint: Option<String>,
+    /// Sync only a specific file (relative to folder)
+    #[arg(long)]
+    file: Option<String>,
     },
     /// Launch local web UI
     Ui { #[arg(long, default_value_t = 8080)] port: u16 },
@@ -70,13 +79,13 @@ enum TrustCmd {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Serve { folder, port } => {
+        Commands::Serve { folder, port, file } => {
             println!("LeafSync server starting on 0.0.0.0:{port}");
-            net::run_server(folder, port).await?;
+            net::run_server_filtered(folder, port, file).await?;
         }
-        Commands::Connect { addr, folder, accept_first, fingerprint } => {
+        Commands::Connect { addr, folder, accept_first, fingerprint, file } => {
             println!("LeafSync connecting to {addr}");
-            net::run_client(addr, folder, accept_first, fingerprint).await?;
+            net::run_client_filtered(addr, folder, accept_first, fingerprint, file).await?;
         }
         Commands::Trust(cmd) => {
             match cmd {
@@ -103,9 +112,12 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Watch { folder, addr, accept_first, fingerprint } => {
+        Commands::Watch { folder, addr, accept_first, fingerprint, file } => {
             println!("Watching {} -> {}", folder.display(), addr);
-            watch::watch_and_sync(folder, addr, accept_first, fingerprint).await?;
+            // Use filtered spawn so it periodically pulls/pushes only the file
+            watch::spawn_watch_filtered(folder, addr, accept_first, fingerprint, file)?
+                .stop()
+                .await;
         }
         Commands::Ui { port } => {
             println!("Starting LeafSync web UI on http://127.0.0.1:{port}");

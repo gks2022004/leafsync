@@ -25,6 +25,7 @@ fn is_ignored(gs: &GlobSet, root: &Path, p: &Path) -> bool {
     gs.is_match(rel)
 }
 
+#[allow(dead_code)]
 pub async fn watch_and_sync(root: PathBuf, addr: String, accept_first: bool, fingerprint: Option<String>) -> Result<()> {
     // Wrapper that runs until process exit
     let cancel = Arc::new(AtomicBool::new(false));
@@ -121,6 +122,7 @@ async fn watch_and_sync_with_cancel(root: PathBuf, addr: String, accept_first: b
         }
     }
 
+    #[allow(dead_code)]
     pub fn spawn_watch(root: PathBuf, addr: String, accept_first: bool, fingerprint: Option<String>) -> Result<WatchHandle> {
         spawn_watch_filtered(root, addr, accept_first, fingerprint, None)
     }

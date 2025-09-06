@@ -55,6 +55,7 @@ fn hash_pair(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
 }
 
 // Compute which chunk indices differ by comparing two trees.
+#[allow(dead_code)]
 pub fn diff_chunks(a: &MerkleTree, b: &MerkleTree) -> Vec<u64> {
     if a.leaves.len() != b.leaves.len() {
         // lengths differ, request all from b

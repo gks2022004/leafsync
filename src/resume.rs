@@ -41,6 +41,7 @@ pub fn get(addr: &str, rel_path: &str, root: &[u8; 32]) -> Result<Option<ResumeE
     Ok(store.entries.get(&key_s).cloned())
 }
 
+#[allow(dead_code)]
 pub fn upsert_mark(addr: &str, rel_path: &str, size: u64, chunk_count: u64, root: [u8;32], index: u64) -> Result<()> {
     upsert_mark_many(addr, rel_path, size, chunk_count, root, &[index])
 }
@@ -105,11 +106,13 @@ fn get_bit(bits: &[u8], index: usize) -> bool {
     (bits[byte] & (1u8 << bit)) != 0
 }
 
+#[allow(dead_code)]
 pub fn list_all() -> Result<Vec<(String, ResumeEntry)>> {
     let s = load_store()?;
     Ok(s.entries.into_iter().collect())
 }
 
+#[allow(dead_code)]
 pub fn parse_hex32(s: &str) -> Result<[u8;32]> {
     let s = s.trim();
     if s.len() != 64 { return Err(anyhow::anyhow!("expected 64 hex chars")); }
