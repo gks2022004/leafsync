@@ -11,12 +11,15 @@ Peer‑to‑peer file sync over QUIC with Merkle‑based delta transfers.
 - Resume partial transfers (chunk‑level bitmaps)
 - TOFU trust pinning (accept‑first or pinned fingerprint)
 - Watch mode with bidirectional behavior (pull periodically + push on local change)
+- Parallel chunk streams per file (configurable), optional global rate limiting
+- Excludes internal artifacts: .leafsync_tmp, .leafsync_trash, .git, and *.part
 - Web UI:
   - Folder/file picker with Windows quick links (Desktop/Downloads/Documents/Pictures/Music/Videos/Home)
   - “Select File” support in Serve, Connect, and Watch (single‑file sync)
   - Live status with per‑file progress bar and MB/s speed
   - Polished, consistent control sizing
   - Optional “Mirror deletes” for Connect/Watch (safe delete: move local‑only files to .leafsync_trash)
+  - Streams and rate limit inputs for quick performance tuning
 
 ## Quick start (Web UI)
 1) Launch the UI
@@ -47,10 +50,10 @@ The CLI supports single‑file sync and mirror deletes flags.
 cargo run -- serve .\shared --port 4455 [--file relative\\path\\to\\file]
 
 # Connect to a server and sync (first time: trust on first use)
-cargo run -- connect 127.0.0.1:4455 .\shared --accept-first [--fingerprint <hex>] [--file relative\\path\\to\\file] [--mirror]
+cargo run -- connect 127.0.0.1:4455 .\shared --accept-first [--fingerprint <hex>] [--file relative\\path\\to\\file] [--mirror] [--streams 8] [--rate-mbps 50]
 
 # Watch a folder and sync on changes (bidirectional: also pulls periodically)
-cargo run -- watch .\shared 127.0.0.1:4455 --accept-first [--fingerprint <hex>] [--file relative\\path\\to\\file] [--mirror]
+cargo run -- watch .\shared 127.0.0.1:4455 --accept-first [--fingerprint <hex>] [--file relative\\path\\to\\file] [--mirror] [--streams 8] [--rate-mbps 50]
 
 # Manage trusted fingerprints (TOFU store)
 cargo run -- trust list
@@ -62,6 +65,7 @@ Tips
 - After the first successful connect, the fingerprint is pinned and reused.
 - Allow UDP on your chosen port in Windows Firewall.
  - Mirror deletes is safe by design: instead of hard‑deleting, it moves local‑only files into a timestamped folder under .leafsync_trash so you can undo.
+ - Internal paths are ignored automatically: .leafsync_tmp/, .leafsync_trash/, .git/, and any *.part staging files.
 
 ## How it works
 1) Summary + diff
@@ -101,8 +105,16 @@ Tips
 - Single‑file mode
   - Targeting one file reduces metadata exchange and scanning overhead.
 - Practical tuning
+  - Streams: 4–8 on LAN works well; up to 16 on high‑latency links. Increase gradually.
+  - Rate limit: set --rate-mbps to avoid saturating shared links.
   - Run on wired/LAN or strong Wi‑Fi for peak throughput.
   - Exclude large caches/temp folders via .leafsyncignore to reduce scanning.
+
+## Mirror deletes (safety)
+- When enabled on Connect/Watch, files present locally but missing on the server are moved to:
+  - <local folder>\/.leafsync_trash\/<timestamp>\/<relative path>
+- Only the local side is affected; the server’s folder is not pruned.
+- Restore by moving files back from .leafsync_trash.
 
 ## Security
 - Self‑signed TLS with certificate fingerprint pinning (TOFU).
@@ -116,9 +128,12 @@ Tips
   - Atomic finalize truncates staged files to the exact size before rename; re‑run connect if needed.
 - Watch doesn’t fire
   - Confirm Watch is started on the correct local folder; .leafsyncignore may exclude the path.
+- “Push verify failed” on server during uploads
+  - Fixed by seeding the server’s staging from existing destination before applying deltas. Update to latest build.
+  - Also ensure internal folders are excluded; don’t place data under .leafsync_tmp or .leafsync_trash.
 
 ## Roadmap
-- Parallel transfers (multiple streams)
+- Cross‑file parallelism and parallel uploads
 - mDNS peer discovery + UPnP mapping
 - Mirror retention policy and history view; optional true delete
 - Conflict detection/resolve UX
