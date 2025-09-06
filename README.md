@@ -2,6 +2,8 @@
 
 Peer‑to‑peer file sync over QUIC with Merkle‑based delta transfers.
 
+<img width="1272" height="863" alt="image" src="https://github.com/user-attachments/assets/67d903d2-4bd1-46c4-9a91-69090920d928" />
+
 ## What’s inside
 - QUIC transport (quinn) + TLS (rustls), single UDP port
 - Fixed‑size chunking (1 MiB) with Merkle trees for delta sync
