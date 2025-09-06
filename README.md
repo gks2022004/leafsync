@@ -14,6 +14,7 @@ Peer‑to‑peer file sync over QUIC with Merkle‑based delta transfers.
   - “Select File” support in Serve, Connect, and Watch (single‑file sync)
   - Live status with per‑file progress bar and MB/s speed
   - Polished, consistent control sizing
+  - Optional “Mirror deletes” for Connect/Watch (safe delete: move local‑only files to .leafsync_trash)
 
 ## Quick start (Web UI)
 1) Launch the UI
@@ -37,17 +38,17 @@ Notes
 - On Windows, the picker shows quick links (Desktop, Downloads, Documents, Pictures, Music, Videos, Home).
 
 ## CLI usage
-The CLI supports the core flows. Specific‑file filtering is available via the Web UI (CLI flags coming next).
+The CLI supports single‑file sync and mirror deletes flags.
 
 ```powershell
 # Start a server (listener)
-cargo run -- serve .\shared --port 4455
+cargo run -- serve .\shared --port 4455 [--file relative\\path\\to\\file]
 
 # Connect to a server and sync (first time: trust on first use)
-cargo run -- connect 127.0.0.1:4455 .\shared --accept-first
+cargo run -- connect 127.0.0.1:4455 .\shared --accept-first [--fingerprint <hex>] [--file relative\\path\\to\\file] [--mirror]
 
 # Watch a folder and sync on changes (bidirectional: also pulls periodically)
-cargo run -- watch .\shared 127.0.0.1:4455 --accept-first
+cargo run -- watch .\shared 127.0.0.1:4455 --accept-first [--fingerprint <hex>] [--file relative\\path\\to\\file] [--mirror]
 
 # Manage trusted fingerprints (TOFU store)
 cargo run -- trust list
@@ -58,6 +59,7 @@ cargo run -- trust remove 127.0.0.1:4455
 Tips
 - After the first successful connect, the fingerprint is pinned and reused.
 - Allow UDP on your chosen port in Windows Firewall.
+ - Mirror deletes is safe by design: instead of hard‑deleting, it moves local‑only files into a timestamped folder under .leafsync_trash so you can undo.
 
 ## How it works
 1) Summary + diff
@@ -114,9 +116,9 @@ Tips
   - Confirm Watch is started on the correct local folder; .leafsyncignore may exclude the path.
 
 ## Roadmap
-- CLI flags for specific‑file sync (parity with Web UI)
 - Parallel transfers (multiple streams)
 - mDNS peer discovery + UPnP mapping
-- Conflict detection and delete propagation
+- Mirror retention policy and history view; optional true delete
+- Conflict detection/resolve UX
 - Mobile apps (Android/iOS)
 

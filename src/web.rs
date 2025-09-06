@@ -16,13 +16,13 @@ type SyncStatus = crate::status::SyncStatus;
 struct ServeReq { folder: String, port: u16, rel_file: Option<String> }
 
 #[derive(Deserialize)]
-struct ConnectReq { addr: String, folder: String, accept_first: bool, fingerprint: Option<String>, rel_file: Option<String> }
+struct ConnectReq { addr: String, folder: String, accept_first: bool, fingerprint: Option<String>, rel_file: Option<String>, mirror: Option<bool>, streams: Option<usize>, rate_mbps: Option<f64> }
 
 #[derive(Serialize)]
 struct Resp { ok: bool, msg: String }
 
 #[derive(Deserialize)]
-struct WatchReq { folder: String, addr: String, accept_first: bool, fingerprint: Option<String>, rel_file: Option<String> }
+struct WatchReq { folder: String, addr: String, accept_first: bool, fingerprint: Option<String>, rel_file: Option<String>, mirror: Option<bool>, streams: Option<usize>, rate_mbps: Option<f64> }
 
 #[derive(Deserialize)]
 struct StopReq {}
@@ -212,18 +212,26 @@ async fn index() -> axum::response::Html<&'static str> {
       const addr=$('connect-addr').value.trim(); const folder=$('connect-folder').value.trim();
       const accept_first=$('accept-first').checked; const fingerprint=$('fingerprint').value.trim()||null;
       const rel_file=($('connect-file')?.value.trim()||'')||null;
+      const mirror=$('connect-mirror')?.checked||false;
+      const streams=parseInt($('connect-streams')?.value||'4');
+      const rate_mbps=parseFloat($('connect-rate')?.value||'');
+      const rate = isNaN(rate_mbps)? null : rate_mbps;
       if(!addr||!folder){toast('Address and local folder are required');return}
       $('connect-btn').disabled=true;
-      const r=await fetch('/api/connect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({addr,folder,accept_first,fingerprint,rel_file})});
+      const r=await fetch('/api/connect',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({addr,folder,accept_first,fingerprint,rel_file,mirror,streams,rate_mbps:rate})});
       const j=await r.json(); $('connect-out').textContent=j.msg; $('connect-btn').disabled=false; toast('Connect started')
     }
     async function startWatch(){
       const folder=$('watch-folder').value.trim(); const addr=$('watch-addr').value.trim();
       const accept_first=$('watch-accept-first').checked; const fingerprint=$('watch-fp').value.trim()||null;
       const rel_file=($('watch-file')?.value.trim()||'')||null;
+      const mirror=$('watch-mirror')?.checked||false;
+      const streams=parseInt($('watch-streams')?.value||'4');
+      const rate_mbps=parseFloat($('watch-rate')?.value||'');
+      const rate = isNaN(rate_mbps)? null : rate_mbps;
       if(!folder||!addr){toast('Watch folder and address are required');return}
       $('watch-start').disabled=true; $('watch-stop').disabled=true;
-      const r=await fetch('/api/watch/start',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({folder,addr,accept_first,fingerprint,rel_file})});
+      const r=await fetch('/api/watch/start',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({folder,addr,accept_first,fingerprint,rel_file,mirror,streams,rate_mbps:rate})});
       const j=await r.json(); $('watch-out').textContent=j.msg; $('watch-start').disabled=false; $('watch-stop').disabled=false; toast('Watch started')
     }
     async function stopWatch(){
@@ -286,8 +294,14 @@ async fn index() -> axum::response::Html<&'static str> {
         </div>
         <div class="controls-3">
           <label><input type="checkbox" id="accept-first"/> Accept first</label>
+          <label><input type="checkbox" id="connect-mirror"/> Mirror deletes</label>
           <input id="fingerprint" type="text" placeholder="Fingerprint (hex, optional)" />
           <button id="connect-btn" class="btn btn-primary" onclick="connectPeer()">Connect</button>
+        </div>
+        <div class="controls-3">
+          <input id="connect-streams" type="number" min="1" max="16" value="4" placeholder="Streams (1-16)" />
+          <input id="connect-rate" type="number" min="0" step="0.1" placeholder="Rate limit (Mbps, optional)" />
+          <div></div>
         </div>
         <div class="controls">
           <input id="connect-file" type="text" placeholder="Specific file to sync (relative to folder, optional)" />
@@ -304,11 +318,17 @@ async fn index() -> axum::response::Html<&'static str> {
         </div>
         <div class="controls-3">
           <label><input type="checkbox" id="watch-accept-first"/> Accept first</label>
+          <label><input type="checkbox" id="watch-mirror"/> Mirror deletes</label>
           <input id="watch-fp" type="text" placeholder="Fingerprint (hex, optional)" />
           <div class="row">
             <button id="watch-start" class="btn btn-primary" onclick="startWatch()">Start Watch</button>
             <button id="watch-stop" class="btn btn-outline" onclick="stopWatch()">Stop Watch</button>
           </div>
+        </div>
+        <div class="controls-3">
+          <input id="watch-streams" type="number" min="1" max="16" value="4" placeholder="Streams (1-16)" />
+          <input id="watch-rate" type="number" min="0" step="0.1" placeholder="Rate limit (Mbps, optional)" />
+          <div></div>
         </div>
         <div class="controls">
           <input id="watch-file" type="text" placeholder="Specific file to sync (relative to folder, optional)" />
@@ -363,7 +383,16 @@ async fn api_serve(State(_state): State<Arc<AppState>>, Json(req): Json<ServeReq
 async fn api_connect(State(_state): State<Arc<AppState>>, Json(req): Json<ConnectReq>) -> Json<Resp> {
     let folder = PathBuf::from(req.folder);
     tokio::spawn(async move {
-  if let Err(e) = crate::net::run_client_filtered(req.addr, folder, req.accept_first, req.fingerprint, req.rel_file).await {
+  if let Err(e) = crate::net::run_client_filtered(
+      req.addr,
+      folder,
+      req.accept_first,
+      req.fingerprint,
+      req.rel_file,
+      req.mirror.unwrap_or(false),
+      req.streams.unwrap_or(4),
+      req.rate_mbps,
+    ).await {
             eprintln!("client error: {e:?}");
         }
     });
@@ -375,7 +404,16 @@ async fn api_watch_start(State(state): State<Arc<AppState>>, Json(req): Json<Wat
   if guard.is_some() {
     return Json(Resp { ok: false, msg: "Watch already running".to_string() });
   }
-  match crate::watch::spawn_watch_filtered(PathBuf::from(req.folder), req.addr, req.accept_first, req.fingerprint, req.rel_file) {
+  match crate::watch::spawn_watch_filtered(
+      PathBuf::from(req.folder),
+      req.addr,
+      req.accept_first,
+      req.fingerprint,
+      req.rel_file,
+      req.mirror.unwrap_or(false),
+      req.streams.unwrap_or(4),
+      req.rate_mbps,
+    ) {
     Ok(handle) => { 
       *guard = Some(handle);
       let mut st = state.status.lock().await;

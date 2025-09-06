@@ -45,6 +45,15 @@ enum Commands {
     /// Sync only a specific file (relative to folder)
     #[arg(long)]
     file: Option<String>,
+    /// Mirror deletes (move local-only files into .leafsync_trash)
+    #[arg(long)]
+    mirror: bool,
+    /// Number of concurrent download streams (1-16)
+    #[arg(long, default_value_t = 4)]
+    streams: usize,
+    /// Rate limit in Mbps (omit for unlimited)
+    #[arg(long)]
+    rate_mbps: Option<f64>,
     },
     /// Manage trusted server fingerprints (TOFU)
     #[command(subcommand)]
@@ -60,6 +69,15 @@ enum Commands {
     /// Sync only a specific file (relative to folder)
     #[arg(long)]
     file: Option<String>,
+    /// Mirror deletes (move local-only files into .leafsync_trash)
+    #[arg(long)]
+    mirror: bool,
+    /// Number of concurrent download streams (1-16)
+    #[arg(long, default_value_t = 4)]
+    streams: usize,
+    /// Rate limit in Mbps (omit for unlimited)
+    #[arg(long)]
+    rate_mbps: Option<f64>,
     },
     /// Launch local web UI
     Ui { #[arg(long, default_value_t = 8080)] port: u16 },
@@ -83,9 +101,9 @@ async fn main() -> Result<()> {
             println!("LeafSync server starting on 0.0.0.0:{port}");
             net::run_server_filtered(folder, port, file).await?;
         }
-        Commands::Connect { addr, folder, accept_first, fingerprint, file } => {
+        Commands::Connect { addr, folder, accept_first, fingerprint, file, mirror, streams, rate_mbps } => {
             println!("LeafSync connecting to {addr}");
-            net::run_client_filtered(addr, folder, accept_first, fingerprint, file).await?;
+            net::run_client_filtered(addr, folder, accept_first, fingerprint, file, mirror, streams, rate_mbps).await?;
         }
         Commands::Trust(cmd) => {
             match cmd {
@@ -112,10 +130,10 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Watch { folder, addr, accept_first, fingerprint, file } => {
+        Commands::Watch { folder, addr, accept_first, fingerprint, file, mirror, streams, rate_mbps } => {
             println!("Watching {} -> {}", folder.display(), addr);
             // Use filtered spawn so it periodically pulls/pushes only the file
-            watch::spawn_watch_filtered(folder, addr, accept_first, fingerprint, file)?
+            watch::spawn_watch_filtered(folder, addr, accept_first, fingerprint, file, mirror, streams, rate_mbps)?
                 .stop()
                 .await;
         }
